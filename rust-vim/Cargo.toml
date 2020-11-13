@@ -1,0 +1,13 @@
+[package]
+name = "rust-vim"
+version = "0.1.0"
+authors = ["Matthew Pomes <the10thwiz@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+terminal = { version = "*", features = ["crossterm-backend"] }
+log = "*"
+env_logger = "*"
+rust-vim-common = { path = "../rust-vim-common" }

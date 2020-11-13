@@ -1,0 +1,7 @@
+
+[workspace]
+
+members = [
+   "rust-vim",
+   "rust-vim-common"
+]
