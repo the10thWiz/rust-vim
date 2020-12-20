@@ -8,6 +8,7 @@ mod buffer;
 mod channel;
 mod commands;
 mod keymap;
+mod plugin;
 mod window;
 
 use buffer::Buffer;

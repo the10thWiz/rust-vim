@@ -52,7 +52,7 @@ impl Window {
     }
     pub fn draw<W: Write>(&self, terminal: &mut Terminal<W>) -> Result<()> {
         terminal.batch(Action::SetBackgroundColor(Color::Red))?;
-
+        let (a, b) = ("", 0);
         terminal.batch(Action::MoveCursorTo(
             self.area.c_min + 1 + self.gutter_width,
             1,

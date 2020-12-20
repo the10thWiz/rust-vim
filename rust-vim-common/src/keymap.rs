@@ -154,7 +154,6 @@ mod channelmap {
     impl Keymap {
         /// Adds the channel as a binding for the keys provided
         pub fn add_binding(keys: (), channel: (Sender<Event>, Receiver<Response>)) {}
-        pub fn dispatch_key(key: KeyEvent) {
-        }
+        pub fn dispatch_key(key: KeyEvent) {}
     }
 }
