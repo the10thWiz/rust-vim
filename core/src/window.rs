@@ -5,16 +5,16 @@
 //
 
 use std::io::Write;
-use std::sync::{Arc, RwLock};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use crossterm::Result;
 
-use crate::buffer::{Buffer, BufferRef};
+use crate::buffer::BufferRef;
 use crate::cursor::CursorShape;
+use crate::keymap::{Action, State};
 use crate::util::Pos;
+use crate::Vim;
 use crate::{cursor::Motion, Area, Cursor, EventReader, Renderable};
-use crate::{Command, Lockable};
 
 bitfield::bitfield! {
     #[derive(Clone, Copy)]
@@ -71,6 +71,19 @@ pub enum WinMode {
     VisualBlock,
 }
 
+impl WinMode {
+    pub fn get_shape(&self) -> CursorShape {
+        match self {
+            Self::Normal => CursorShape::Block,
+            Self::Operation(_) => CursorShape::Block,
+            Self::Insert => CursorShape::Line,
+            Self::Visual => CursorShape::Block,
+            Self::VisualLine => CursorShape::Block,
+            Self::VisualBlock => CursorShape::Block,
+        }
+    }
+}
+
 pub struct Window {
     buffer: BufferRef,
     area: Area,
@@ -98,6 +111,25 @@ impl Window {
 
     pub fn cursor(&self) -> Cursor {
         self.cursor
+    }
+
+    pub fn cursor_mut(&mut self) -> &mut Cursor {
+        &mut self.cursor
+    }
+
+    pub fn cursor_apply(&mut self, motion: Motion) -> &mut Self {
+        self.cursor.apply(motion, self.buffer_area());
+        self
+    }
+
+    pub fn mode(&self) -> WinMode {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: WinMode) -> &mut Self {
+        self.cursor.set_shape(mode.get_shape());
+        self.mode = mode;
+        self
     }
 
     #[inline(always)]
@@ -176,11 +208,24 @@ impl Window {
     }
 
     #[inline(always)]
-    fn buffer_area(&self) -> Area {
+    pub fn buffer_area(&self) -> Area {
         self.buffer_offset().area(
             self.area.w - self.border_width() * 2 - self.gutter_width() - self.linenum_width(),
             self.area.h - self.border_width() * 2 - self.status_height(),
         )
+    }
+
+    pub fn get_state(&self) -> State {
+        match self.mode {
+            WinMode::Normal => State::Normal,
+            WinMode::Operation(_) => State::Operator,
+            WinMode::Insert => State::Insert,
+            WinMode::Visual | WinMode::VisualLine | WinMode::VisualBlock => State::Visual,
+        }
+    }
+
+    pub fn buffer(&self) -> &BufferRef {
+        &self.buffer
     }
 }
 
@@ -247,8 +292,8 @@ pub enum WinAction {
     None,
 }
 
-impl Command for WinAction {
-    fn execute<W: Lockable>(self, editor: &mut crate::Curse<W>) {
+impl Action for WinAction {
+    fn run(&self, editor: &mut Vim) {
         match self {
             Self::None => (),
         }
@@ -261,64 +306,6 @@ impl EventReader for Window {
         let KeyEvent { code, modifiers } = key;
         let area = self.buffer_area();
         match self.mode {
-            WinMode::Normal => match code {
-                KeyCode::Char('i') => {
-                    self.cursor.set_shape(CursorShape::Line);
-                    self.mode = WinMode::Insert;
-                }
-                KeyCode::Char('I') => {
-                    self.cursor.apply(Motion::Col(0), area);
-                    self.cursor.set_shape(CursorShape::Line);
-                    self.mode = WinMode::Insert;
-                }
-                KeyCode::Char('a') => {
-                    self.cursor.set_shape(CursorShape::Line);
-                    self.cursor.apply(Motion::Relative(1, 0), area);
-                    self.mode = WinMode::Insert;
-                }
-                KeyCode::Char('A') => {
-                    self.cursor.set_shape(CursorShape::Line);
-                    self.cursor.apply(Motion::Col(u16::MAX), area);
-                    self.mode = WinMode::Insert;
-                }
-                KeyCode::Char('h') | KeyCode::Left => {
-                    self.cursor.apply(Motion::Relative(-1, 0), area);
-                }
-                KeyCode::Char('l') | KeyCode::Right => {
-                    self.cursor.apply(Motion::Relative(1, 0), area);
-                }
-                KeyCode::Char('j') | KeyCode::Down => {
-                    self.cursor.apply(Motion::Relative(0, 1), area);
-                }
-                KeyCode::Char('k') | KeyCode::Up => {
-                    self.cursor.apply(Motion::Relative(0, -1), area);
-                }
-                KeyCode::Char('$') | KeyCode::End => {
-                    self.cursor.apply(Motion::Col(area.w), area);
-                }
-                KeyCode::Char('0') => {
-                    self.cursor.apply(Motion::Col(0), area);
-                }
-                KeyCode::Char('^') | KeyCode::Home => {
-                    self.cursor.apply(
-                        Motion::Col(
-                            self.buffer
-                                .read()
-                                .get_line(self.cursor.row(area))
-                                .unwrap()
-                                .first_char() as u16,
-                        ),
-                        area,
-                    );
-                }
-                KeyCode::Char('d') => {
-                    self.mode = WinMode::Operation(Op::Delete);
-                }
-                KeyCode::Char('y') => {
-                    self.mode = WinMode::Operation(Op::Yank);
-                }
-                _ => todo!("Key event: {key:?}"),
-            },
             WinMode::Insert => {
                 if modifiers == KeyModifiers::NONE {
                     match code {

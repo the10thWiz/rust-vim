@@ -12,3 +12,4 @@ crossterm = "0.24.0"
 log = "*"
 enum-map = "*"
 bitfield = "*"
+clap = { version = "*", features = ["derive"] }

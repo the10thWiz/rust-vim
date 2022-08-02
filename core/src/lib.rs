@@ -2,14 +2,17 @@ mod buffer;
 mod cursor;
 mod util;
 mod window;
+mod keymap;
+mod args;
 
 use std::{
     io::{Stdout, StdoutLock, Write},
-    sync::{Arc, RwLock},
     time::Duration,
 };
 
-use buffer::{Buffer, BufferRef};
+use args::Args;
+use buffer::BufferRef;
+use clap::Parser;
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
@@ -22,6 +25,7 @@ use crossterm::{
     QueueableCommand,
 };
 use cursor::Cursor;
+use keymap::{Action, MapSet, State, MapAction};
 use log::error;
 use util::Area;
 use window::Window;
@@ -40,12 +44,8 @@ impl Lockable for Stdout {
     }
 }
 
-pub trait Command {
-    fn execute<W: Lockable>(self, editor: &mut Curse<W>);
-}
-
 pub trait EventReader {
-    type Act: Command;
+    type Act: Action;
     fn on_key(&mut self, key: KeyEvent) -> Self::Act;
     fn on_mouse(&mut self, mouse: MouseEvent) -> Self::Act;
 }
@@ -121,15 +121,104 @@ pub enum TerminalState {
     Exit,
 }
 
-pub struct Curse<W: Lockable> {
+pub struct Vim {
+    args: Args,
     buffers: Vec<BufferRef>,
-    terminal: W,
     windows: WindowSet,
     focus: usize,
     floating: Vec<Window>,
     size: (u16, u16),
     state: TerminalState,
     cursor: Cursor,
+    map_set: MapSet,
+}
+
+impl Vim {
+    pub fn new() -> Self {
+        let args = Args::parse();
+        let empty = BufferRef::empty();
+        Self {
+            args,
+            buffers: vec![empty.clone()],
+            windows: WindowSet::Window(Window::new(empty)),
+            floating: vec![],
+            size: (0, 0),
+            state: TerminalState::Window,
+            cursor: Cursor::invalid(),
+            focus: 0,
+            map_set: MapSet::global(),
+        }
+    }
+
+    fn update_area(&mut self, size: (u16, u16)) {
+        if size != self.size {
+            self.size = size;
+            self.windows.set_area(Area {
+                x: 0,
+                y: 0,
+                w: self.size.0,
+                h: self.size.1,
+            });
+        }
+    }
+
+    fn on_event(&mut self, event: Event) {
+        match event {
+            Event::Resize(c, r) => self.update_area((c, r)),
+            Event::Key(k) => {
+                if k.code == KeyCode::Char('c') && k.modifiers == KeyModifiers::CONTROL {
+                    self.state = TerminalState::Exit;
+                } else {
+                    match self.map_set.on_key(k, self.get_state()) {
+                        MapAction::Act(a) => a.run(self),
+                        MapAction::Wait => (),
+                        MapAction::None => self.get_focus_mut().on_key(k).run(self),
+                    }
+                }
+            }
+            Event::Mouse(m) => self.get_focus_mut().on_mouse(m).run(self),
+        }
+    }
+
+    pub fn get_state(&self) -> State {
+        match self.state {
+            TerminalState::Cli => State::Cli,
+            TerminalState::Exit => State::Normal,
+            TerminalState::Window => self.get_focus().get_state(),
+        }
+    }
+
+    fn draw<W: Write>(&mut self, mut lock: W) -> Result<()> {
+        self.windows.draw(&mut lock)?;
+        self.cursor = self.get_focus().cursor();
+        self.cursor.draw(&mut lock)?;
+        Ok(())
+    }
+
+    pub fn exiting(&self) -> bool {
+        self.state == TerminalState::Exit
+    }
+
+    pub fn get_focus(&self) -> &Window {
+        if self.focus == self.floating.len() {
+            self.windows.get_focus()
+        } else {
+            &self.floating[self.focus]
+        }
+    }
+
+    pub fn get_focus_mut(&mut self) -> &mut Window {
+        if self.focus == self.floating.len() {
+            self.windows.get_focus_mut()
+        } else {
+            &mut self.floating[self.focus]
+        }
+    }
+}
+
+pub struct Curse<W: Lockable> {
+    vim: Vim,
+    terminal: W,
 }
 
 impl Curse<Stdout> {
@@ -140,16 +229,9 @@ impl Curse<Stdout> {
 
 impl<W: Lockable> Curse<W> {
     pub fn new(terminal: W) -> Self {
-        let empty = BufferRef::empty();
         Self {
-            buffers: vec![empty.clone()],
             terminal,
-            windows: WindowSet::Window(Window::new(empty)),
-            floating: vec![],
-            size: (0, 0),
-            state: TerminalState::Window,
-            cursor: Cursor::invalid(),
-            focus: 0,
+            vim: Vim::new(),
         }
     }
 
@@ -173,36 +255,13 @@ impl<W: Lockable> Curse<W> {
         Ok(())
     }
 
-    fn update_area(&mut self, size: (u16, u16)) {
-        if size != self.size {
-            self.size = size;
-            self.windows.set_area(Area {
-                x: 0,
-                y: 0,
-                w: self.size.0,
-                h: self.size.1,
-            });
-        }
-    }
-
     fn event_loop(&mut self) -> Result<()> {
-        self.update_area(terminal::size()?);
+        self.vim.update_area(terminal::size()?);
         self.draw()?;
-        while self.state != TerminalState::Exit {
+        while !self.vim.exiting() {
             if event::poll(Duration::from_millis(20))? {
                 let e = event::read()?;
-                match e {
-                    Event::Resize(c, r) => self.update_area((c, r)),
-                    Event::Key(k) => {
-                        if k.code == KeyCode::Char('c') && k.modifiers == KeyModifiers::CONTROL {
-                            self.state = TerminalState::Exit;
-                        } else {
-                            self.get_focus_mut().on_key(k).execute(self);
-                        }
-                    }
-                    Event::Mouse(m) => self.get_focus_mut().on_mouse(m).execute(self),
-                    //_ => todo!("Event: {e:?}"),
-                }
+                self.vim.on_event(e);
             }
             self.draw()?;
         }
@@ -211,27 +270,9 @@ impl<W: Lockable> Curse<W> {
 
     fn draw(&mut self) -> Result<()> {
         let mut lock = self.terminal.lock();
-        self.windows.draw(&mut lock)?;
-        self.cursor = self.get_focus().cursor();
-        self.cursor.draw(&mut lock)?;
+        self.vim.draw(&mut lock)?;
         lock.flush()?;
         Ok(())
-    }
-
-    pub fn get_focus(&self) -> &Window {
-        if self.focus == self.floating.len() {
-            self.windows.get_focus()
-        } else {
-            &self.floating[self.focus]
-        }
-    }
-
-    pub fn get_focus_mut(&mut self) -> &mut Window {
-        if self.focus == self.floating.len() {
-            self.windows.get_focus_mut()
-        } else {
-            &mut self.floating[self.focus]
-        }
     }
 }
 
