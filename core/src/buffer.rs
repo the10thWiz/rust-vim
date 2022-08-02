@@ -11,16 +11,27 @@ use std::{
     sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
+use crossterm::style::ContentStyle;
+
 use crate::Result;
 
 pub struct Line {
     text: String,
+    style: Vec<(usize, ContentStyle)>,
 }
 
 impl Line {
     fn empty() -> Self {
         Self {
             text: String::new(),
+            style: vec![(0, ContentStyle::default())],
+        }
+    }
+
+    fn new(text: String) -> Self {
+        Self {
+            style: vec![(text.len(), ContentStyle::default())],
+            text,
         }
     }
 
@@ -37,6 +48,10 @@ impl Line {
         self.text
             .find(|c: char| !c.is_whitespace())
             .unwrap_or(self.text.len())
+    }
+
+    fn update(&mut self) {
+        self.style.last_mut().unwrap().0 = self.text.len();
     }
 }
 
@@ -62,29 +77,33 @@ impl Buffer {
     }
 
     pub fn append_line(&mut self, text: String) {
-        self.data.push(Line { text });
+        self.data.push(Line::new(text));
     }
 
     pub fn insert_line(&mut self, line: usize, text: String) {
-        self.data.insert(line, Line { text });
+        self.data.insert(line, Line::new( text ));
     }
 
     pub fn insert_char(&mut self, line: usize, col: usize, ch: char) {
         self.data[line].text.insert(col, ch);
+        self.data[line].update();
     }
 
     pub fn remove_char(&mut self, line: usize, col: usize) {
         self.data[line].text.remove(col);
+        self.data[line].update();
     }
 
     pub fn split_line(&mut self, line: usize, col: usize) {
         let text = self.data[line].text.split_off(col);
-        self.data.insert(line + 1, Line { text })
+        self.data.insert(line + 1, Line::new( text ));
+        self.data[line].update();
     }
 
     pub fn join_line(&mut self, line: usize) {
         let next = self.data.remove(line + 1);
         self.data[line].text += next.text.as_str();
+        self.data[line].update();
     }
 }
 
