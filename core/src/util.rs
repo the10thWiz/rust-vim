@@ -12,10 +12,10 @@ use crate::Result;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Area {
-    pub x: u16,
-    pub y: u16,
-    pub w: u16,
-    pub h: u16,
+    pub x: usize,
+    pub y: usize,
+    pub w: usize,
+    pub h: usize,
 }
 
 impl Area {
@@ -23,11 +23,11 @@ impl Area {
         Pos(self.x, self.y)
     }
 
-    pub fn height(&self) -> u16 {
+    pub fn height(&self) -> usize {
         self.h
     }
 
-    pub fn width(&self) -> u16 {
+    pub fn width(&self) -> usize {
         self.w
     }
 
@@ -41,7 +41,7 @@ impl Area {
 
 pub struct LineIter<'s> {
     area: &'s Area,
-    line: u16,
+    line: usize,
 }
 
 impl<'s> Iterator for LineIter<'s> {
@@ -58,10 +58,10 @@ impl<'s> Iterator for LineIter<'s> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Pos(pub u16, pub u16);
+pub struct Pos(pub usize, pub usize);
 
 impl Pos {
-    pub fn area(&self, w: u16, h: u16) -> Area {
+    pub fn area(&self, w: usize, h: usize) -> Area {
         Area {
             x: self.0,
             y: self.1,
@@ -74,7 +74,7 @@ impl Pos {
     }
 
     pub fn move_cursor<W: Write>(&self, term: &mut W) -> Result<()> {
-        term.queue(MoveTo(self.0, self.1))?;
+        term.queue(MoveTo(self.0 as u16, self.1 as u16))?;
         Ok(())
     }
 }

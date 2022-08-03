@@ -1,9 +1,12 @@
+#![feature(round_char_boundary)]
+
+mod args;
 mod buffer;
+mod cli;
 mod cursor;
+mod keymap;
 mod util;
 mod window;
-mod keymap;
-mod args;
 
 use std::{
     io::{Stdout, StdoutLock, Write},
@@ -13,6 +16,7 @@ use std::{
 use args::Args;
 use buffer::BufferRef;
 use clap::Parser;
+use cli::{Cli, CliState};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
@@ -25,10 +29,10 @@ use crossterm::{
     QueueableCommand,
 };
 use cursor::Cursor;
-use keymap::{Action, MapSet, State, MapAction};
+use keymap::{Action, MapAction, MapSet, State};
 use log::error;
 use util::Area;
-use window::Window;
+use window::{Window, WinMode};
 
 pub use crossterm::Result;
 
@@ -53,6 +57,7 @@ pub trait EventReader {
 pub trait Renderable {
     fn set_area(&mut self, new_area: Area);
     fn area(&self) -> Area;
+    fn cursor_pos(&self) -> Cursor;
     fn draw<W: Write>(&mut self, term: &mut W) -> Result<()>;
 }
 
@@ -104,6 +109,10 @@ impl Renderable for WindowSet {
         }
     }
 
+    fn cursor_pos(&self) -> Cursor {
+        self.get_focus().cursor_pos()
+    }
+
     fn draw<W: Write>(&mut self, term: &mut W) -> Result<()> {
         match self {
             Self::Window(w) => w.draw(term),
@@ -131,34 +140,74 @@ pub struct Vim {
     state: TerminalState,
     cursor: Cursor,
     map_set: MapSet,
+    cli: CliState,
 }
 
 impl Vim {
     pub fn new() -> Self {
         let args = Args::parse();
-        let empty = BufferRef::empty();
+        let mut buffers: Vec<_> = args
+            .files
+            .iter()
+            .map(|p| BufferRef::from_file(p.clone()).unwrap())
+            .collect();
+        if buffers.is_empty() {
+            buffers.push(BufferRef::empty());
+        }
         Self {
             args,
-            buffers: vec![empty.clone()],
-            windows: WindowSet::Window(Window::new(empty)),
+            windows: WindowSet::Window(Window::new(buffers[0].clone())),
+            buffers,
             floating: vec![],
             size: (0, 0),
             state: TerminalState::Window,
             cursor: Cursor::invalid(),
             focus: 0,
             map_set: MapSet::global(),
+            cli: CliState::new(),
         }
     }
 
+    pub fn start_cli(&mut self, ty: Cli) {
+        self.cli.start(ty);
+        self.state = TerminalState::Cli;
+    }
+
+    pub fn end_cli(&mut self) {
+        self.cli.end();
+        self.state = TerminalState::Window;
+    }
+
+    pub fn exit(&mut self) {
+        self.state = TerminalState::Exit;
+    }
+
+    pub fn set_mode(&mut self, mode: WinMode) -> &mut Window {
+        self.message(mode.get_message().to_string());
+        let win = self.get_focus_mut();
+        win.set_mode(mode);
+        win
+    }
+
     fn update_area(&mut self, size: (u16, u16)) {
+        if size.1 == 0 || size.0 == 0 {
+            panic!("Why is the terminal at a size of {:?}?", size);
+        }
         if size != self.size {
-            self.size = size;
             self.windows.set_area(Area {
                 x: 0,
                 y: 0,
-                w: self.size.0,
-                h: self.size.1,
+                w: size.0 as usize,
+                h: size.1 as usize - 1,
             });
+            self.cli.set_area(Area {
+                x: 0,
+                y: size.1 as usize - 1,
+                w: size.0 as usize,
+                h: 1,
+            });
+            // TODO: adjust floating windows
+            self.size = size;
         }
     }
 
@@ -169,14 +218,22 @@ impl Vim {
                 if k.code == KeyCode::Char('c') && k.modifiers == KeyModifiers::CONTROL {
                     self.state = TerminalState::Exit;
                 } else {
-                    match self.map_set.on_key(k, self.get_state()) {
-                        MapAction::Act(a) => a.run(self),
-                        MapAction::Wait => (),
-                        MapAction::None => self.get_focus_mut().on_key(k).run(self),
+                    match self.state {
+                        TerminalState::Window => match self.map_set.on_key(k, self.get_state()) {
+                            MapAction::Act(a) => a.run(self),
+                            MapAction::Wait => (),
+                            MapAction::None => self.get_focus_mut().on_key(k).run(self),
+                        },
+                        TerminalState::Cli => self.cli.on_key(k).run(self),
+                        TerminalState::Exit => (),
                     }
                 }
             }
-            Event::Mouse(m) => self.get_focus_mut().on_mouse(m).run(self),
+            Event::Mouse(m) => match self.state {
+                TerminalState::Window => self.get_focus_mut().on_mouse(m).run(self),
+                TerminalState::Cli => self.cli.on_mouse(m).run(self),
+                TerminalState::Exit => (),
+            },
         }
     }
 
@@ -190,8 +247,16 @@ impl Vim {
 
     fn draw<W: Write>(&mut self, mut lock: W) -> Result<()> {
         self.windows.draw(&mut lock)?;
-        self.cursor = self.get_focus().cursor();
+        self.cli.draw(&mut lock)?;
+        match self.state {
+            TerminalState::Window => {
+                self.cursor = self.get_focus().cursor_pos();
+            }
+            TerminalState::Cli => self.cursor = self.cli.cursor_pos(),
+            TerminalState::Exit => (),
+        }
         self.cursor.draw(&mut lock)?;
+        //self.message(format!("{:?}", self.cursor));
         Ok(())
     }
 
@@ -212,6 +277,20 @@ impl Vim {
             self.windows.get_focus_mut()
         } else {
             &mut self.floating[self.focus]
+        }
+    }
+
+    pub fn get_message(&self) -> &str {
+        self.cli.get_message()
+    }
+
+    pub fn message(&mut self, message: String) {
+        self.cli.message(message);
+    }
+
+    pub fn err(&mut self, error: Result<()>) {
+        if let Err(e) = error {
+            self.message(format!("{e}"));
         }
     }
 }

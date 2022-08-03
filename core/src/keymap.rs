@@ -6,15 +6,13 @@
 
 use std::{collections::HashMap, fmt::Debug, sync::Arc};
 
-use crossterm::{
-    cursor::CursorShape,
-    event::{KeyCode, KeyEvent, KeyModifiers},
-};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use enum_map::{Enum, EnumMap};
 
 use crate::{
+    cli::Cli,
     cursor::Motion,
-    window::{Op, WinMode, Window},
+    window::{Dist, Op, Scroll, WinMode},
     Vim,
 };
 
@@ -38,6 +36,7 @@ pub enum MapAction {
     None,
 }
 
+#[derive(Clone)]
 enum KeyMapAction {
     Action(Arc<dyn Action>),
     Chord(HashMap<KeyEvent, KeyMapAction>, Option<Arc<dyn Action>>),
@@ -181,51 +180,66 @@ impl MapSet {
     pub fn global() -> Self {
         let mut s = Self::default();
         keys!(s, State::Normal => {
+            Esc => |_v| (),
             'i' => |v| {
-                v.get_focus_mut().set_mode(WinMode::Insert);
+                v.set_mode(WinMode::Insert);
             },
             'I' => |v| {
-                v.get_focus_mut().cursor_apply(Motion::Col(0)).set_mode(WinMode::Insert);
+                v.set_mode(WinMode::Insert).cursor_apply(Motion::SetCol(0));
             },
             'a' => |v| {
-                v.get_focus_mut().cursor_apply(Motion::Relative(1, 0)).set_mode(WinMode::Insert);
+                v.set_mode(WinMode::Insert).cursor_apply(Motion::Right);
             },
             'A' => |v| {
-                v.get_focus_mut().cursor_apply(Motion::Col(u16::MAX)).set_mode(WinMode::Insert);
+                v.set_mode(WinMode::Insert).cursor_apply(Motion::End);
+            },
+            'v' => |v| {
+                v.set_mode(WinMode::Visual);
+            },
+            'V' => |v| {
+                v.set_mode(WinMode::VisualLine);
             },
             'h' | Left => |v| {
-                v.get_focus_mut().cursor_apply(Motion::Relative(-1, 0));
+                v.get_focus_mut().cursor_apply(Motion::Left);
             },
             'l' | Right => |v| {
-                v.get_focus_mut().cursor_apply(Motion::Relative(1, 0));
+                v.get_focus_mut().cursor_apply(Motion::Right);
             },
             'j' | Down => |v| {
-                v.get_focus_mut().cursor_apply(Motion::Relative(0, 1));
+                v.get_focus_mut().cursor_apply(Motion::Down);
             },
             'k' | Up => |v| {
-                v.get_focus_mut().cursor_apply(Motion::Relative(0, -1));
+                v.get_focus_mut().cursor_apply(Motion::Up);
             },
             '$' | End => |v| {
-                let win = v.get_focus_mut();
-                win.cursor_apply(Motion::Col(win.buffer_area().w));
+                v.get_focus_mut().cursor_apply(Motion::End);
             },
             '0' => |v| {
-                v.get_focus_mut().cursor_apply(Motion::Col(0));
+                v.get_focus_mut().cursor_apply(Motion::SetCol(0));
             },
             '^' | Home => |v| {
                 let win = v.get_focus_mut();
                 let col = win.buffer()
                             .read()
-                            .get_line(win.cursor().row(win.buffer_area()))
+                            .get_line(win.cursor().row())
                             .unwrap()
-                            .first_char() as u16;
-                win.cursor_apply(Motion::Col(col));
+                            .first_char();
+                win.cursor_apply(Motion::SetCol(col));
             },
             'd' => |v| {
-                v.get_focus_mut().set_mode(WinMode::Operation(Op::Delete));
+                v.set_mode(WinMode::Operation(Op::Delete));
             },
             'y' => |v| {
-                v.get_focus_mut().set_mode(WinMode::Operation(Op::Yank));
+                v.set_mode(WinMode::Operation(Op::Yank));
+            },
+            ':' => |v| {
+                v.start_cli(Cli::Command);
+            },
+            'e' C => |v| {
+                v.get_focus_mut().scroll(Scroll::Down, Dist::One);
+            },
+            'Y' C => |v| {
+                v.get_focus_mut().scroll(Scroll::Up, Dist::One);
             },
             'w' C => {
                 'h' => |_v| todo!("Window Movement"),
@@ -234,13 +248,34 @@ impl MapSet {
                 'l' => |_v| todo!("Window Movement"),
             },
         });
+        let arrow_keys = s.clone_bindings(State::Normal, [
+            keys!(@keycode Up),
+            keys!(@keycode Down),
+            keys!(@keycode Left),
+            keys!(@keycode Right),
+            keys!(@keycode Home),
+            keys!(@keycode End),
+        ]);
+        s.register_bindings(State::Insert, arrow_keys.clone());
+        s.register_bindings(State::Visual, arrow_keys.clone());
+        let hjkl_keys = s.clone_bindings(State::Normal, [
+            keys!(@keycode 'h'),
+            keys!(@keycode 'j'),
+            keys!(@keycode 'k'),
+            keys!(@keycode 'l'),
+            keys!(@keycode '$'),
+            keys!(@keycode '^'),
+            keys!(@keycode '0'),
+        ]);
+        s.register_bindings(State::Visual, hjkl_keys.clone());
+        let win_keys = s.clone_bindings(State::Normal, [
+            keys!(@keycode 'w' C),
+        ]);
+        s.register_bindings(State::Insert, win_keys.clone());
+        s.register_bindings(State::Visual, win_keys.clone());
+        s.register_bindings(State::Operator, win_keys.clone());
         s
     }
-
-    //pub fn window() -> Self {
-        //let mut s = Self::default();
-        //s
-    //}
 
     fn register_bindings(
         &mut self,
@@ -250,6 +285,20 @@ impl MapSet {
         for (k, a) in bindings {
             self.map[state].map.insert(k, a);
         }
+    }
+
+    fn clone_bindings(
+        &self,
+        state: State,
+        iter: impl IntoIterator<Item = KeyEvent>,
+    ) -> Vec<(KeyEvent, KeyMapAction)> {
+        let mut ret = vec![];
+        for k in iter {
+            if let Some(act) = self.map[state].map.get(&k) {
+                ret.push((k, act.clone()));
+            }
+        }
+        ret
     }
 
     pub fn on_key(&mut self, k: KeyEvent, state: State) -> MapAction {

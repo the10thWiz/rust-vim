@@ -4,72 +4,84 @@
 // Distributed under terms of the MIT license.
 //
 
+use crate::{buffer::BufferRead, Area, Result};
+use crossterm::{
+    cursor::{MoveTo, SetCursorShape},
+    QueueableCommand,
+};
 use std::io::Write;
-use crossterm::{QueueableCommand, cursor::{MoveTo, SetCursorShape}};
-use crate::{Area, Result};
 
 pub use crossterm::cursor::CursorShape;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Motion {
-    Relative(i16, i16),
-    Absolute(u16, u16),
-    Col(u16),
-    Row(u16),
-    None,
+    SetCol(usize),
+    SetRow(usize),
+    Up,
+    Down,
+    Left,
+    Right,
+    End,
+    Start,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cursor {
-    pos: (u16, u16),
+    x: usize,
+    y: usize,
     ty: CursorShape,
 }
 
 impl Cursor {
-    pub fn new(area: Area) -> Self {
+    pub fn new() -> Self {
         Self {
-            pos: (area.x, area.y),
+            x: 0,
+            y: 0,
             ty: CursorShape::Block,
         }
+    }
+
+    pub fn from_params(x: usize, y: usize, ty: CursorShape) -> Self {
+        Self { x, y, ty }
     }
 
     pub(crate) fn invalid() -> Self {
         Self {
-            pos: (!0, !0),
+            x: !0,
+            y: !0,
             ty: CursorShape::Block,
         }
     }
 
-    pub fn row(&self, area: Area) -> usize {
-        (self.pos.1 - area.y) as usize
+    pub fn row(&self) -> usize {
+        self.y
     }
 
-    pub fn col(&self, area: Area) -> usize {
-        (self.pos.0 - area.x) as usize
+    pub fn col(&self) -> usize {
+        self.x
     }
 
-    pub fn apply(&mut self, motion: Motion, area: Area) {
-        let (c, r) = match motion {
-            Motion::Relative(c, r) => (self.pos.0 as i16 + c, self.pos.1 as i16 + r),
-            Motion::Absolute(c, r) => (c as i16, r as i16),
-            Motion::Row(r) => (self.pos.0 as i16, (r + area.y) as i16),
-            Motion::Col(c) => ((c + area.x) as i16, self.pos.1 as i16),
-            Motion::None => (self.pos.0 as i16, self.pos.1 as i16),
-        };
-        if r < area.y as i16 {
-            self.pos.1 = area.y;
-        } else if r >= area.y as i16 + area.h as i16 {
-            self.pos.1 = area.y + area.h - 1;
-        } else {
-            self.pos.1 = r as u16;
+    pub fn apply(&mut self, motion: Motion, buffer: &BufferRead, insert: bool) {
+        match motion {
+            Motion::SetRow(r) => self.y = r.min(buffer.len() - 1),
+            Motion::SetCol(c) => {
+                self.x = c.min(
+                    buffer[self.y]
+                        .len()
+                        .saturating_sub(if insert { 0 } else { 1 }),
+                )
+            }
+            Motion::Up => self.y = self.y.saturating_sub(1),
+            Motion::Down => self.y = self.y.saturating_add(1).min(buffer.len() - 1),
+            Motion::Left => self.x = buffer[self.y].prev(self.x),
+            Motion::Right => self.x = buffer[self.y].next(self.x, insert),
+            Motion::End => self.x = buffer[self.y].len(),
+            Motion::Start => self.x = buffer[self.y].first_char(),
         }
-        if c < area.x as i16 {
-            self.pos.0 = area.x;
-        } else if c >= area.x as i16 + area.w as i16 {
-            self.pos.0 = area.x + area.w - 1;
-        } else {
-            self.pos.0 = c as u16;
-        }
+    }
+
+    pub fn shape(&self) -> CursorShape {
+        self.ty
     }
 
     pub fn set_shape(&mut self, shape: CursorShape) {
@@ -77,10 +89,8 @@ impl Cursor {
     }
 
     pub fn draw<W: Write>(&self, mut term: W) -> Result<()> {
-        term.queue(MoveTo(self.pos.0, self.pos.1))?;
+        term.queue(MoveTo(self.x as u16, self.y as u16))?;
         term.queue(SetCursorShape(self.ty))?;
         Ok(())
     }
 }
-
-

@@ -15,18 +15,18 @@ use clap::Parser;
 #[clap(version, author, about)]
 pub struct Args {
     /// Files to open
-    files: Vec<PathBuf>,
+    pub files: Vec<PathBuf>,
     /// Open files in Read Only mode
     #[clap(short = 'R', long)]
-    read_only: bool,
+    pub read_only: bool,
     /// Do not execute initialization
     #[clap(long)]
-    clean: bool,
+    pub clean: bool,
     /// Time the startup sequence
     #[clap(long)]
-    time_startup: bool,
+    pub time_startup: bool,
     /// Run command before starting interactive mode
     #[clap(short, long)]
-    command: Vec<String>,
+    pub command: Vec<String>,
 }
 

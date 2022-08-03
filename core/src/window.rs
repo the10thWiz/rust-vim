@@ -8,6 +8,7 @@ use std::io::Write;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
 use crossterm::Result;
+use log::info;
 
 use crate::buffer::BufferRef;
 use crate::cursor::CursorShape;
@@ -66,6 +67,7 @@ pub enum WinMode {
     Normal,
     Operation(Op),
     Insert,
+    Replace,
     Visual,
     VisualLine,
     VisualBlock,
@@ -77,18 +79,55 @@ impl WinMode {
             Self::Normal => CursorShape::Block,
             Self::Operation(_) => CursorShape::Block,
             Self::Insert => CursorShape::Line,
+            Self::Replace => CursorShape::UnderScore,
             Self::Visual => CursorShape::Block,
             Self::VisualLine => CursorShape::Block,
             Self::VisualBlock => CursorShape::Block,
         }
     }
+
+    pub fn get_message(&self) -> &'static str {
+        match self {
+            Self::Normal => "",
+            Self::Operation(_) => "",
+            Self::Insert => "-- INSERT --",
+            Self::Replace => "-- REPLACE --",
+            Self::Visual => "-- VISUAL --",
+            Self::VisualLine => "-- VISUAL LINE --",
+            Self::VisualBlock => "-- VISUAL BLOCK --",
+        }
+    }
+
+    pub fn insert(&self) -> bool {
+        match self {
+            Self::Insert | Self::Replace => true,
+            _ => false,
+        }
+    }
+}
+
+pub enum Scroll {
+    Down,
+    Up,
+    Left,
+    Right,
+}
+
+pub enum Dist {
+    One,
+    HalfScreen,
+    Screen,
+}
+
+pub struct VisibileArea {
+    screen_pos: Area,
+    buffer_row: usize,
+    buffer_col: usize,
 }
 
 pub struct Window {
     buffer: BufferRef,
-    area: Area,
-    buffer_row: usize,
-    buffer_col: usize,
+    buffer_view: VisibileArea,
     window_props: WindowProps,
     window_updates: WindowProps,
     cursor: Cursor,
@@ -98,13 +137,15 @@ pub struct Window {
 impl Window {
     pub fn new(buffer: BufferRef) -> Self {
         Self {
-            area: Area::default(),
             buffer,
-            buffer_row: 0,
-            buffer_col: 0,
+            buffer_view: VisibileArea {
+                screen_pos: Area::default(),
+                buffer_row: 0,
+                buffer_col: 0,
+            },
             window_props: WindowProps::default(),
             window_updates: WindowProps::all(),
-            cursor: Cursor::new(Area::default()),
+            cursor: Cursor::new(),
             mode: WinMode::Normal,
         }
     }
@@ -118,8 +159,83 @@ impl Window {
     }
 
     pub fn cursor_apply(&mut self, motion: Motion) -> &mut Self {
-        self.cursor.apply(motion, self.buffer_area());
+        self.cursor
+            .apply(motion, &self.buffer.read(), self.mode == WinMode::Insert);
+        if self.cursor.row() < self.buffer_view.buffer_row {
+            self.buffer_view.buffer_row = self.cursor.row();
+            self.on_scroll();
+        } else if self.cursor.row()
+            >= self.buffer_view.buffer_row + self.buffer_view.screen_pos.height()
+        {
+            self.buffer_view.buffer_row =
+                self.cursor.row() - self.buffer_view.screen_pos.height() + 1;
+            self.on_scroll();
+        }
+        if self.cursor.col() < self.buffer_view.buffer_col {
+            self.buffer_view.buffer_col = self.cursor.col();
+            self.on_scroll();
+        } else if self.cursor.col()
+            >= self.buffer_view.buffer_col + self.buffer_view.screen_pos.width()
+        {
+            self.buffer_view.buffer_col =
+                self.cursor.col() - self.buffer_view.screen_pos.width() + 1;
+            self.on_scroll();
+        }
         self
+    }
+
+    fn on_scroll(&mut self) {
+        self.window_updates.set_gutter(true);
+        self.window_updates.set_buffer(true);
+        self.window_updates.set_linenum(true);
+    }
+
+    pub fn scroll(&mut self, scroll: Scroll, dist: Dist) {
+        match scroll {
+            Scroll::Down => {
+                self.buffer_view.buffer_row = self
+                    .buffer_view
+                    .buffer_row
+                    .saturating_add(self.row_dist(dist))
+                    .min(self.buffer.read().len().saturating_sub(1))
+            }
+            Scroll::Up => {
+                self.buffer_view.buffer_row = self
+                    .buffer_view
+                    .buffer_row
+                    .saturating_sub(self.row_dist(dist));
+            }
+            Scroll::Right => {
+                self.buffer_view.buffer_col = self
+                    .buffer_view
+                    .buffer_col
+                    .saturating_add(self.col_dist(dist))
+                    .min(self.buffer.read()[self.cursor.row()].len() - 1)
+            }
+            Scroll::Left => {
+                self.buffer_view.buffer_col = self
+                    .buffer_view
+                    .buffer_col
+                    .saturating_sub(self.col_dist(dist));
+            }
+        }
+        self.on_scroll();
+    }
+
+    fn row_dist(&self, dist: Dist) -> usize {
+        match dist {
+            Dist::One => 1,
+            Dist::HalfScreen => self.buffer_area().height() / 2,
+            Dist::Screen => self.buffer_area().height(),
+        }
+    }
+
+    fn col_dist(&self, dist: Dist) -> usize {
+        match dist {
+            Dist::One => 1,
+            Dist::HalfScreen => self.buffer_area().width() / 2,
+            Dist::Screen => self.buffer_area().width(),
+        }
     }
 
     pub fn mode(&self) -> WinMode {
@@ -128,12 +244,15 @@ impl Window {
 
     pub fn set_mode(&mut self, mode: WinMode) -> &mut Self {
         self.cursor.set_shape(mode.get_shape());
+        if self.mode == WinMode::Insert {
+            self.cursor_apply(Motion::Left);
+        }
         self.mode = mode;
         self
     }
 
     #[inline(always)]
-    fn border_width(&self) -> u16 {
+    fn border_width(&self) -> usize {
         if self.window_props.border() {
             1
         } else {
@@ -143,11 +262,11 @@ impl Window {
 
     #[inline(always)]
     fn gutter_offset(&self) -> Pos {
-        Pos(self.border_width(), self.border_width()) + self.area.pos()
+        Pos(self.border_width(), self.border_width()) + self.area().pos()
     }
 
     #[inline(always)]
-    fn gutter_width(&self) -> u16 {
+    fn gutter_width(&self) -> usize {
         if self.window_props.gutter() {
             2
         } else {
@@ -159,7 +278,7 @@ impl Window {
     fn gutter_area(&self) -> Area {
         self.gutter_offset().area(
             self.gutter_width(),
-            self.area.h - self.border_width() * 2 - self.status_height(),
+            self.area().h - self.border_width() * 2 - self.status_height(),
         )
     }
 
@@ -169,7 +288,7 @@ impl Window {
     }
 
     #[inline(always)]
-    fn linenum_width(&self) -> u16 {
+    fn linenum_width(&self) -> usize {
         if self.window_props.linenum() {
             4
         } else {
@@ -181,7 +300,7 @@ impl Window {
     fn linenum_area(&self) -> Area {
         self.linenum_offset().area(
             self.linenum_width(),
-            self.area.h - self.border_width() * 2 - self.status_height(),
+            self.area().h - self.border_width() * 2 - self.status_height(),
         )
     }
 
@@ -189,12 +308,12 @@ impl Window {
     fn status_offset(&self) -> Pos {
         Pos(
             self.gutter_width() + self.linenum_width() + self.border_width(),
-            self.area.h - self.border_width() - 1,
+            self.area().h - self.border_width() - 1,
         )
     }
 
     #[inline(always)]
-    fn status_height(&self) -> u16 {
+    fn status_height(&self) -> usize {
         if self.window_props.status() {
             1
         } else {
@@ -210,8 +329,8 @@ impl Window {
     #[inline(always)]
     pub fn buffer_area(&self) -> Area {
         self.buffer_offset().area(
-            self.area.w - self.border_width() * 2 - self.gutter_width() - self.linenum_width(),
-            self.area.h - self.border_width() * 2 - self.status_height(),
+            self.area().w - self.border_width() * 2 - self.gutter_width() - self.linenum_width(),
+            self.area().h - self.border_width() * 2 - self.status_height(),
         )
     }
 
@@ -219,7 +338,7 @@ impl Window {
         match self.mode {
             WinMode::Normal => State::Normal,
             WinMode::Operation(_) => State::Operator,
-            WinMode::Insert => State::Insert,
+            WinMode::Insert | WinMode::Replace => State::Insert,
             WinMode::Visual | WinMode::VisualLine | WinMode::VisualBlock => State::Visual,
         }
     }
@@ -231,12 +350,20 @@ impl Window {
 
 impl Renderable for Window {
     fn area(&self) -> Area {
-        self.area
+        self.buffer_view.screen_pos
     }
 
     fn set_area(&mut self, new_area: Area) {
-        self.area = new_area;
-        self.cursor.apply(Motion::None, self.buffer_area());
+        self.buffer_view.screen_pos = new_area;
+        //self.cursor.apply(Motion::None, self.buffer_area());
+    }
+
+    fn cursor_pos(&self) -> Cursor {
+        Cursor::from_params(
+            self.cursor().col() - self.buffer_view.buffer_col + self.buffer_area().x,
+            self.cursor().row() - self.buffer_view.buffer_row + self.buffer_area().y,
+            self.cursor().shape(),
+        )
     }
 
     fn draw<W: Write>(&mut self, term: &mut W) -> Result<()> {
@@ -249,7 +376,7 @@ impl Renderable for Window {
             let area = self.gutter_area();
             for (i, line) in area.lines().enumerate() {
                 line.move_cursor(term)?;
-                if i + self.buffer_row < buf_read.len() {
+                if i + self.buffer_view.buffer_row < buf_read.len() {
                     write!(term, "{:width$}", "", width = area.w as usize)?;
                 } else {
                     write!(term, "{:width$}", "", width = area.w as usize)?;
@@ -261,8 +388,9 @@ impl Renderable for Window {
             let area = self.linenum_area();
             for (i, line) in area.lines().enumerate() {
                 line.move_cursor(term)?;
-                if i + self.buffer_row < buf_read.len() {
-                    write!(term, "{i:width$} ", width = area.w as usize - 1)?;
+                let row = i + self.buffer_view.buffer_row;
+                if row < buf_read.len() {
+                    write!(term, "{row:width$} ", width = area.w as usize - 1)?;
                 } else {
                     write!(term, "{:width$}", " ~ ", width = area.w as usize)?;
                 }
@@ -276,7 +404,7 @@ impl Renderable for Window {
             let area = self.buffer_area();
             for (i, line) in area.lines().enumerate() {
                 line.move_cursor(term)?;
-                if let Some(l) = buf_read.get_line(i + self.buffer_row) {
+                if let Some(l) = buf_read.get_line(i + self.buffer_view.buffer_row) {
                     l.draw(term, area.w as usize)?;
                 } else {
                     write!(term, "{:width$}", "", width = area.w as usize)?;
@@ -290,12 +418,14 @@ impl Renderable for Window {
 
 pub enum WinAction {
     None,
+    SetMessage(&'static str),
 }
 
 impl Action for WinAction {
     fn run(&self, editor: &mut Vim) {
         match self {
             Self::None => (),
+            Self::SetMessage(m) => editor.message(m.to_string()),
         }
     }
 }
@@ -305,110 +435,98 @@ impl EventReader for Window {
     fn on_key(&mut self, key: KeyEvent) -> Self::Act {
         let KeyEvent { code, modifiers } = key;
         let area = self.buffer_area();
-        match self.mode {
-            WinMode::Insert => {
-                if modifiers == KeyModifiers::NONE {
-                    match code {
-                        KeyCode::Char(c) => {
-                            self.buffer.write().insert_char(
-                                self.cursor.row(area),
-                                self.cursor.col(area),
-                                c,
-                            );
-                            self.cursor.apply(Motion::Relative(1, 0), area);
-                            self.window_updates.set_buffer(true);
-                        }
-                        KeyCode::Left => {
-                            self.cursor.apply(Motion::Relative(-1, 0), area);
-                        }
-                        KeyCode::Right => {
-                            self.cursor.apply(Motion::Relative(1, 0), area);
-                        }
-                        KeyCode::Down => {
-                            self.cursor.apply(Motion::Relative(0, 1), area);
-                        }
-                        KeyCode::Up => {
-                            self.cursor.apply(Motion::Relative(0, -1), area);
-                        }
-                        KeyCode::Backspace => {
-                            if self.cursor.col(area) > 0 {
-                                self.cursor.apply(Motion::Relative(-1, 0), area);
-                                self.buffer
-                                    .write()
-                                    .remove_char(self.cursor.row(area), self.cursor.col(area));
-                                self.window_updates.set_buffer(true);
-                            } else if self.cursor.row(area) > 0 {
-                                let mut buffer = self.buffer.write();
-                                self.cursor.apply(
-                                    Motion::Relative(
-                                        buffer.get_line(self.cursor.row(area) - 1).unwrap().len()
-                                            as i16,
-                                        -1,
-                                    ),
-                                    area,
-                                );
-                                buffer.join_line(self.cursor.row(area));
-                                self.window_updates.set_buffer(true);
-                                self.window_updates.set_linenum(true);
-                                self.window_updates.set_gutter(true);
-                            }
-                        }
-                        KeyCode::Enter => {
-                            self.buffer
-                                .write()
-                                .split_line(self.cursor.row(area), self.cursor.col(area));
-                            self.cursor.apply(Motion::Relative(0, 1), area);
-                            self.cursor.apply(Motion::Col(0), area);
-                            self.window_updates.set_buffer(true);
-                            self.window_updates.set_linenum(true);
-                            self.window_updates.set_gutter(true);
-                        }
-                        KeyCode::Esc => {
-                            self.cursor.set_shape(CursorShape::Block);
-                            self.mode = WinMode::Normal;
-                        }
-                        KeyCode::End => {
-                            self.cursor.apply(Motion::Col(area.w), area);
-                        }
-                        KeyCode::Home => {
-                            self.cursor.apply(
-                                Motion::Col(
-                                    self.buffer
-                                        .read()
-                                        .get_line(self.cursor.row(area))
-                                        .unwrap()
-                                        .first_char() as u16,
-                                ),
-                                area,
-                            );
-                        }
-                        _ => todo!("Insert Key Event: {code:?}"),
+        match code {
+            KeyCode::Char(c) => {
+                if self.mode.insert() && modifiers & !KeyModifiers::SHIFT == KeyModifiers::NONE {
+                    if self.mode == WinMode::Insert {
+                        self.buffer
+                            .write()
+                            .insert_char(self.cursor.row(), self.cursor.col(), c);
+                    } else if self.mode == WinMode::Replace {
+                        self.buffer
+                            .write()
+                            .replace_char(self.cursor.row(), self.cursor.col(), c);
                     }
+                    self.cursor_apply(Motion::Right);
+                    self.window_updates.set_buffer(true);
                 }
             }
-            _ => todo!("{:?}", self.mode),
-        }
-        let buffer = self.buffer.read();
-        if self.cursor.row(area) >= buffer.len() {
-            self.cursor
-                .apply(Motion::Row(buffer.len().saturating_sub(1) as u16), area);
-        }
-        let len = if self.mode == WinMode::Insert {
-            buffer.get_line(self.cursor.row(area)).unwrap().len()
-        } else {
-            buffer
-                .get_line(self.cursor.row(area))
-                .unwrap()
-                .len()
-                .saturating_sub(1)
-        };
-        if self.cursor.col(area) > len {
-            self.cursor.apply(Motion::Col(len as u16), area);
+            KeyCode::Backspace => {
+                if self.mode.insert() {
+                    if self.cursor.col() > 0 {
+                        self.cursor_apply(Motion::Left);
+                        self.buffer
+                            .write()
+                            .remove_char(self.cursor.row(), self.cursor.col());
+                        self.window_updates.set_buffer(true);
+                    } else if self.cursor.row() > 0 {
+                        self.cursor_apply(Motion::Up);
+                        self.cursor_apply(Motion::End);
+                        self.buffer().write().join_line(self.cursor.row());
+                        self.window_updates.set_buffer(true);
+                        self.window_updates.set_linenum(true);
+                        self.window_updates.set_gutter(true);
+                    }
+                } else if self.cursor.col() == 0 {
+                    self.cursor_apply(Motion::Up);
+                    self.cursor_apply(Motion::End);
+                } else {
+                    self.cursor_apply(Motion::Left);
+                }
+            }
+            KeyCode::Delete => {
+                if self.cursor.col() < self.buffer.read()[self.cursor.row()].len() {
+                    self.buffer
+                        .write()
+                        .remove_char(self.cursor.row(), self.cursor.col());
+                    self.window_updates.set_buffer(true);
+                } else if self.cursor.row() + 1 < self.buffer.read().len() {
+                    self.buffer().write().join_line(self.cursor.row());
+                    self.window_updates.set_buffer(true);
+                    self.window_updates.set_linenum(true);
+                    self.window_updates.set_gutter(true);
+                }
+            }
+            KeyCode::Enter => {
+                if self.mode.insert() {
+                    self.buffer
+                        .write()
+                        .split_line(self.cursor.row(), self.cursor.col());
+                    self.cursor_apply(Motion::Down);
+                    self.cursor_apply(Motion::SetCol(0));
+                    self.window_updates.set_buffer(true);
+                    self.window_updates.set_linenum(true);
+                    self.window_updates.set_gutter(true);
+                } else {
+                    self.cursor_apply(Motion::Down);
+                }
+            }
+            KeyCode::Esc => {
+                self.set_mode(WinMode::Normal);
+                return WinAction::SetMessage("");
+            }
+            KeyCode::End => {
+                self.cursor_apply(Motion::SetCol(area.w));
+            }
+            KeyCode::Home => {
+                self.cursor_apply(Motion::Start);
+            }
+            KeyCode::Insert => {
+                if self.mode == WinMode::Insert {
+                    self.set_mode(WinMode::Replace);
+                } else if self.mode == WinMode::Replace {
+                    self.set_mode(WinMode::Insert);
+                } else {
+                    self.set_mode(WinMode::Insert);
+                }
+            }
+            _ => (),
         }
         WinAction::None
     }
 
     fn on_mouse(&mut self, mouse: MouseEvent) -> Self::Act {
-        todo!("Mouse event: {mouse:?}")
+        info!("Mouse event: {mouse:?}");
+        WinAction::None
     }
 }
