@@ -13,3 +13,4 @@ log = "*"
 enum-map = "*"
 bitfield = "*"
 clap = { version = "*", features = ["derive"] }
+backtrace = "0.3"

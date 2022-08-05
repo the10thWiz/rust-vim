@@ -16,6 +16,10 @@ use crossterm::style::ContentStyle;
 
 use crate::{util::Area, Result};
 
+pub trait BufferSelect {
+    fn select(&self, buffer: &Buffer) -> bool;
+}
+
 pub struct Line {
     text: String,
     style: Vec<(usize, ContentStyle)>,
@@ -102,6 +106,13 @@ impl Buffer {
             file.write_all(b"\n")?;
         }
         Ok(())
+    }
+
+    pub fn title(&self) -> &str {
+        match &self.filename {
+            Some(path) => path.iter().last().map_or("/", |o| o.to_str().unwrap_or("[INVALID PATH]")),
+            None => "[Scratch Buffer]",
+        }
     }
 
     pub fn get_line(&self, line: usize) -> Option<&Line> {

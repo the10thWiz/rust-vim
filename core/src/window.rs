@@ -5,12 +5,13 @@
 //
 
 use std::io::Write;
+use std::ops::Deref;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind, MouseButton};
 use crossterm::Result;
 use log::info;
 
-use crate::buffer::BufferRef;
+use crate::buffer::{BufferRef, BufferSelect};
 use crate::cursor::CursorShape;
 use crate::keymap::{Action, State};
 use crate::util::Pos;
@@ -60,6 +61,7 @@ impl Default for WindowProps {
 pub enum Op {
     Delete,
     Yank,
+    Replace,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,6 +117,7 @@ pub enum Scroll {
 
 pub enum Dist {
     One,
+    Step,
     HalfScreen,
     Screen,
 }
@@ -148,6 +151,10 @@ impl Window {
             cursor: Cursor::new(),
             mode: WinMode::Normal,
         }
+    }
+
+    pub fn buffer_select(&self, criteria: &impl BufferSelect) -> bool {
+        criteria.select(self.buffer.read().deref())
     }
 
     pub fn cursor(&self) -> Cursor {
@@ -190,6 +197,15 @@ impl Window {
         self.window_updates.set_linenum(true);
     }
 
+    pub fn redraw_all(&mut self) {
+        self.window_updates.set_gutter(true);
+        self.window_updates.set_buffer(true);
+        self.window_updates.set_linenum(true);
+        self.window_updates.set_status(true);
+        self.window_updates.set_border(true);
+        self.window_updates.set_relative(true);
+    }
+
     pub fn scroll(&mut self, scroll: Scroll, dist: Dist) {
         match scroll {
             Scroll::Down => {
@@ -225,6 +241,7 @@ impl Window {
     fn row_dist(&self, dist: Dist) -> usize {
         match dist {
             Dist::One => 1,
+            Dist::Step => 4,
             Dist::HalfScreen => self.buffer_area().height() / 2,
             Dist::Screen => self.buffer_area().height(),
         }
@@ -233,6 +250,7 @@ impl Window {
     fn col_dist(&self, dist: Dist) -> usize {
         match dist {
             Dist::One => 1,
+            Dist::Step => 4,
             Dist::HalfScreen => self.buffer_area().width() / 2,
             Dist::Screen => self.buffer_area().width(),
         }
@@ -278,7 +296,7 @@ impl Window {
     fn gutter_area(&self) -> Area {
         self.gutter_offset().area(
             self.gutter_width(),
-            self.area().h - self.border_width() * 2 - self.status_height(),
+            self.area().h.saturating_sub(self.border_width() * 2 + self.status_height()),
         )
     }
 
@@ -300,7 +318,7 @@ impl Window {
     fn linenum_area(&self) -> Area {
         self.linenum_offset().area(
             self.linenum_width(),
-            self.area().h - self.border_width() * 2 - self.status_height(),
+            self.area().h.saturating_sub(self.border_width() * 2 + self.status_height()),
         )
     }
 
@@ -308,7 +326,7 @@ impl Window {
     fn status_offset(&self) -> Pos {
         Pos(
             self.gutter_width() + self.linenum_width() + self.border_width(),
-            self.area().h - self.border_width() - 1,
+            self.area().h.saturating_sub(self.border_width() + 1),
         )
     }
 
@@ -329,8 +347,8 @@ impl Window {
     #[inline(always)]
     pub fn buffer_area(&self) -> Area {
         self.buffer_offset().area(
-            self.area().w - self.border_width() * 2 - self.gutter_width() - self.linenum_width(),
-            self.area().h - self.border_width() * 2 - self.status_height(),
+            self.area().w.saturating_sub(self.border_width() * 2 + self.gutter_width() + self.linenum_width()),
+            self.area().h.saturating_sub(self.border_width() * 2 + self.status_height()),
         )
     }
 
@@ -355,7 +373,7 @@ impl Renderable for Window {
 
     fn set_area(&mut self, new_area: Area) {
         self.buffer_view.screen_pos = new_area;
-        //self.cursor.apply(Motion::None, self.buffer_area());
+        self.redraw_all();
     }
 
     fn cursor_pos(&self) -> Cursor {
@@ -527,6 +545,28 @@ impl EventReader for Window {
 
     fn on_mouse(&mut self, mouse: MouseEvent) -> Self::Act {
         info!("Mouse event: {mouse:?}");
+        let MouseEvent { kind, column, row, modifiers } = mouse;
+        // TODO: convert col, row into cursor pos
+        match kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                // Move cursor
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                // Select
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                // No Action
+            }
+            MouseEventKind::Down(MouseButton::Right) => {
+                // Context menu or something
+            }
+            MouseEventKind::Moved => {
+                // Look at hover
+            }
+            MouseEventKind::ScrollUp => self.scroll(Scroll::Up, Dist::Step),
+            MouseEventKind::ScrollDown => self.scroll(Scroll::Down, Dist::Step),
+            _ => (),
+        }
         WinAction::None
     }
 }

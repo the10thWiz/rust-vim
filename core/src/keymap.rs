@@ -4,16 +4,16 @@
 // Distributed under terms of the MIT license.
 //
 
-use std::{collections::HashMap, fmt::Debug, sync::Arc};
+use std::{collections::HashMap, fmt::Debug, sync::Arc, io::Write};
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::{event::{KeyCode, KeyEvent, KeyModifiers}, Result};
 use enum_map::{Enum, EnumMap};
 
 use crate::{
     cli::Cli,
     cursor::Motion,
     window::{Dist, Op, Scroll, WinMode},
-    Vim,
+    Vim, util::KeyDisplay,
 };
 
 pub trait Action {
@@ -31,7 +31,7 @@ where
 }
 
 pub enum MapAction {
-    Act(Arc<dyn Action>),
+    Act(usize, Arc<dyn Action>),
     Wait,
     None,
 }
@@ -60,23 +60,63 @@ impl Debug for KeyMapAction {
     }
 }
 
-#[derive(Debug, Default)]
+impl KeyMapAction {
+    fn insert(&mut self, k: KeyEvent, a: KeyMapAction) {
+        match self {
+            Self::Chord(map, _) => { map.insert(k, a); },
+            Self::Action(old) => {
+                let tmp = Arc::clone(old);
+                *self = Self::Chord(HashMap::new(), Some(tmp));
+                self.insert(k, a);
+            }
+        }
+    }
+
+    fn get(&self, k: &KeyEvent) -> Option<&KeyMapAction> {
+        match self {
+            Self::Chord(map, _) => map.get(k),
+            Self::Action(_) => None,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct KeyMap {
-    map: HashMap<KeyEvent, KeyMapAction>,
+    map: KeyMapAction,
     state: Vec<KeyEvent>,
+    rep: usize,
+}
+
+impl Default for KeyMap {
+    fn default() -> Self {
+        Self {
+            map: KeyMapAction::Chord(HashMap::new(), None),
+            state: vec![],
+            rep: 0,
+        }
+    }
 }
 
 impl KeyMap {
     pub fn clear(&mut self) {
         self.state.clear();
+        self.rep = 0;
     }
 
     pub fn on_key(&mut self, k: KeyEvent) -> MapAction {
+        if let KeyCode::Char(c) = k.code {
+            if let Some(d) = c.to_digit(10).filter(|&d| d != 0 || self.rep != 0) {
+                self.rep = self.rep * 10 + d as usize;
+                return MapAction::Wait;
+            }
+        }
         self.state.push(k);
+        //debug!("Key press: {k:?}");
+        //debug!("Action: {:?}", self.get_action(self.state.as_ref()));
         match self.get_action(self.state.as_ref()) {
             Some(KeyMapAction::Action(a)) => {
-                let ret = MapAction::Act(Arc::clone(a));
-                self.state.clear();
+                let ret = MapAction::Act(self.rep.max(1), Arc::clone(a));
+                self.clear();
                 ret
             }
             Some(KeyMapAction::Chord(_, _)) => MapAction::Wait,
@@ -87,12 +127,12 @@ impl KeyMap {
     fn get_action<'s>(&'s self, path: &[KeyEvent]) -> Option<&'s KeyMapAction> {
         let mut cur = &self.map;
         for event in path {
-            match cur.get(event)? {
+            match cur {
                 a @ KeyMapAction::Action(_) => return Some(a),
-                KeyMapAction::Chord(map, _a) => cur = map,
+                map @ KeyMapAction::Chord(_, _) => cur = map.get(event)?,
             }
         }
-        None
+        Some(cur)
     }
 
     fn default_action(&mut self) -> MapAction {
@@ -100,14 +140,21 @@ impl KeyMap {
             self.state.pop();
             match self.get_action(self.state.as_ref()) {
                 Some(KeyMapAction::Chord(_, Some(a))) => {
-                    let ret = MapAction::Act(Arc::clone(a));
-                    self.state.clear();
+                    let ret = MapAction::Act(self.rep.max(1), Arc::clone(a));
+                    self.clear();
                     return ret;
                 }
                 _ => (),
             }
         }
         MapAction::None
+    }
+
+    pub fn draw<W: Write>(&self, term: &mut W) -> Result<()> {
+        for k in self.state.iter() {
+            write!(term, "{}", KeyDisplay(*k))?;
+        }
+        Ok(())
     }
 }
 
@@ -232,6 +279,12 @@ impl MapSet {
             'y' => |v| {
                 v.set_mode(WinMode::Operation(Op::Yank));
             },
+            'r' => |v| {
+                v.set_mode(WinMode::Operation(Op::Replace));
+            },
+            'R' => |v| {
+                v.set_mode(WinMode::Replace);
+            },
             ':' => |v| {
                 v.start_cli(Cli::Command);
             },
@@ -242,38 +295,44 @@ impl MapSet {
                 v.get_focus_mut().scroll(Scroll::Up, Dist::One);
             },
             'w' C => {
-                'h' => |_v| todo!("Window Movement"),
-                'j' => |_v| todo!("Window Movement"),
-                'k' => |_v| todo!("Window Movement"),
-                'l' => |_v| todo!("Window Movement"),
+                'h' => |v| v.move_focus(Scroll::Left),
+                'j' => |v| v.move_focus(Scroll::Down),
+                'k' => |v| v.move_focus(Scroll::Up),
+                'l' => |v| v.move_focus(Scroll::Right),
             },
         });
-        let arrow_keys = s.clone_bindings(State::Normal, [
-            keys!(@keycode Up),
-            keys!(@keycode Down),
-            keys!(@keycode Left),
-            keys!(@keycode Right),
-            keys!(@keycode Home),
-            keys!(@keycode End),
-        ]);
-        s.register_bindings(State::Insert, arrow_keys.clone());
-        s.register_bindings(State::Visual, arrow_keys.clone());
-        let hjkl_keys = s.clone_bindings(State::Normal, [
-            keys!(@keycode 'h'),
-            keys!(@keycode 'j'),
-            keys!(@keycode 'k'),
-            keys!(@keycode 'l'),
-            keys!(@keycode '$'),
-            keys!(@keycode '^'),
-            keys!(@keycode '0'),
-        ]);
-        s.register_bindings(State::Visual, hjkl_keys.clone());
-        let win_keys = s.clone_bindings(State::Normal, [
-            keys!(@keycode 'w' C),
-        ]);
-        s.register_bindings(State::Insert, win_keys.clone());
-        s.register_bindings(State::Visual, win_keys.clone());
-        s.register_bindings(State::Operator, win_keys.clone());
+        let arrow_keys = s.clone_bindings(
+            State::Normal,
+            [
+                keys!(@keycode Up),
+                keys!(@keycode Down),
+                keys!(@keycode Left),
+                keys!(@keycode Right),
+                keys!(@keycode Home),
+                keys!(@keycode End),
+            ],
+        );
+        s.register_bindings(State::Insert, arrow_keys.iter().cloned());
+        s.register_bindings(State::Visual, arrow_keys.iter().cloned());
+        let hjkl_keys = s.clone_bindings(
+            State::Normal,
+            [
+                keys!(@keycode 'h'),
+                keys!(@keycode 'j'),
+                keys!(@keycode 'k'),
+                keys!(@keycode 'l'),
+                keys!(@keycode '$'),
+                keys!(@keycode '^'),
+                keys!(@keycode '0'),
+                keys!(@keycode 'e' C),
+                keys!(@keycode 'Y' C),
+            ],
+        );
+        s.register_bindings(State::Visual, hjkl_keys.iter().cloned());
+        let win_keys = s.clone_bindings(State::Normal, [keys!(@keycode 'w' C)]);
+        s.register_bindings(State::Insert, win_keys.iter().cloned());
+        s.register_bindings(State::Visual, win_keys.iter().cloned());
+        s.register_bindings(State::Operator, win_keys.iter().cloned());
         s
     }
 
@@ -307,5 +366,9 @@ impl MapSet {
         }
         self.last = state;
         self.map[state].on_key(k)
+    }
+
+    pub fn draw<W: Write>(&self, term: &mut W, state: State) -> Result<()> {
+        self.map[state].draw(term)
     }
 }

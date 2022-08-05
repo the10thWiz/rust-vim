@@ -8,12 +8,14 @@ mod keymap;
 mod util;
 mod window;
 
+use crate::buffer::BufferSelect;
 use std::{
     io::{Stdout, StdoutLock, Write},
     time::Duration,
 };
 
 use args::Args;
+use backtrace::Backtrace;
 use buffer::BufferRef;
 use clap::Parser;
 use cli::{Cli, CliState};
@@ -22,6 +24,7 @@ use crossterm::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
         MouseEvent,
     },
+    style::{Color, ContentStyle, Stylize, SetBackgroundColor},
     terminal::{
         self, disable_raw_mode, enable_raw_mode, DisableLineWrap, EnableLineWrap,
         EnterAlternateScreen, LeaveAlternateScreen,
@@ -30,9 +33,9 @@ use crossterm::{
 };
 use cursor::Cursor;
 use keymap::{Action, MapAction, MapSet, State};
-use log::error;
-use util::Area;
-use window::{Window, WinMode};
+use log::{error, info};
+use util::{Area, Pos};
+use window::{Scroll, WinMode, Window};
 
 pub use crossterm::Result;
 
@@ -65,6 +68,23 @@ pub enum WindowSet {
     Window(Window),
     Horizontal(Vec<WindowSet>, usize, Area),
     Vertical(Vec<WindowSet>, usize, Area),
+    TabSet(Vec<WindowSet>, usize, Area),
+}
+
+impl From<&Vec<BufferRef>> for WindowSet {
+    fn from(v: &Vec<BufferRef>) -> Self {
+        if v.len() == 1 {
+            Self::Window(Window::new(v[0].clone()))
+        } else {
+            Self::TabSet(
+                v.iter()
+                    .map(|b| Self::Window(Window::new(b.clone())))
+                    .collect(),
+                0,
+                Area::default(),
+            )
+        }
+    }
 }
 
 impl WindowSet {
@@ -74,6 +94,7 @@ impl WindowSet {
             Self::Horizontal(set, focused, _) | Self::Vertical(set, focused, _) => {
                 set[*focused].get_focus()
             }
+            Self::TabSet(set, focused, _) => set[*focused].get_focus(),
         }
     }
 
@@ -83,8 +104,161 @@ impl WindowSet {
             Self::Horizontal(set, focused, _) | Self::Vertical(set, focused, _) => {
                 set[*focused].get_focus_mut()
             }
+            Self::TabSet(set, focused, _) => set[*focused].get_focus_mut(),
         }
     }
+
+    pub fn redraw_all(&mut self) {
+        match self {
+            Self::Window(w) => w.redraw_all(),
+            Self::Horizontal(set, _, _) | Self::Vertical(set, _, _) | Self::TabSet(set, _, _) => {
+                for s in set.iter_mut() {
+                    s.redraw_all();
+                }
+            }
+        }
+    }
+
+    /// Move the focus in the direction requested
+    ///
+    /// Returns whether the motion could be completed
+    fn move_focus(&mut self, motion: Scroll) -> bool {
+        match self {
+            Self::Window(_) => false,
+            Self::Horizontal(set, focused, _) => match motion {
+                Scroll::Left => {
+                    if set[*focused].move_focus(motion) {
+                        true
+                    } else if *focused == 0 {
+                        false
+                    } else {
+                        *focused -= 1;
+                        true
+                    }
+                }
+                Scroll::Right => {
+                    if set[*focused].move_focus(motion) {
+                        true
+                    } else if *focused >= set.len() - 1 {
+                        false
+                    } else {
+                        *focused += 1;
+                        true
+                    }
+                }
+                Scroll::Up | Scroll::Down => set[*focused].move_focus(motion),
+            },
+            Self::Vertical(set, focused, _) => match motion {
+                Scroll::Up => {
+                    if set[*focused].move_focus(motion) {
+                        true
+                    } else if *focused == 0 {
+                        false
+                    } else {
+                        *focused -= 1;
+                        true
+                    }
+                }
+                Scroll::Down => {
+                    if set[*focused].move_focus(motion) {
+                        true
+                    } else if *focused >= set.len() - 1 {
+                        false
+                    } else {
+                        *focused += 1;
+                        true
+                    }
+                }
+                Scroll::Left | Scroll::Right => set[*focused].move_focus(motion),
+            },
+            Self::TabSet(set, focused, _) => match motion {
+                Scroll::Left => {
+                    if set[*focused].move_focus(motion) {
+                        true
+                    } else if *focused == 0 {
+                        false
+                    } else {
+                        let area = set[*focused].area();
+                        *focused -= 1;
+                        set[*focused].set_area(area);
+                        set[*focused].redraw_all();
+                        true
+                    }
+                }
+                Scroll::Right => {
+                    if set[*focused].move_focus(motion) {
+                        true
+                    } else if *focused >= set.len() - 1 {
+                        false
+                    } else {
+                        let area = set[*focused].area();
+                        *focused += 1;
+                        set[*focused].set_area(area);
+                        set[*focused].redraw_all();
+                        true
+                    }
+                }
+                Scroll::Up | Scroll::Down => set[*focused].move_focus(motion),
+            },
+        }
+    }
+
+    /// Sets the current focus to the window contianing the buffer selected by the criteria
+    fn jump_to(&mut self, criteria: &impl BufferSelect) -> bool {
+        match self {
+            Self::Window(w) => w.buffer_select(criteria),
+            Self::Horizontal(set, focused, _) | Self::Vertical(set, focused, _) => {
+                for (i, s) in set.iter_mut().enumerate() {
+                    if s.jump_to(criteria) {
+                        *focused = i;
+                        return true;
+                    }
+                }
+                false
+            }
+            Self::TabSet(set, focused, _) => {
+                for (i, s) in set.iter_mut().enumerate() {
+                    if s.jump_to(criteria) {
+                        let area = s.area();
+                        *focused = i;
+                        s.set_area(area);
+                        s.redraw_all();
+                        return true;
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    fn buffer(&self) -> &BufferRef {
+        match self {
+            Self::Window(w) => w.buffer(),
+            Self::Horizontal(set, focused, _)
+            | Self::Vertical(set, focused, _)
+            | Self::TabSet(set, focused, _) => set[*focused].buffer(),
+        }
+    }
+
+    //fn split_vertical(&mut self, new: Window) {
+    //match self {
+    //Self::Window(w) => {
+    //let area = w.area();
+    //let mut n = Self::Vertical(vec![Self::Window(new)], 1, area);
+    //std::mem::swap(self, &mut n);
+    //if let Self::Vertical(set, ..) = self {
+    //set.insert(0, n);
+    //} else {
+    //unreachable!("self was just set to vertical");
+    //}
+    //self.set_area(area);
+    //},
+    //Self::TabSet(set, focused, _) | Self::Horizontal(set, focused, _) => {
+    //set[*focused].split_vertical(new);
+    //},
+    //_ => todo!(),
+    //}
+    //}
 }
 
 impl Renderable for WindowSet {
@@ -99,13 +273,22 @@ impl Renderable for WindowSet {
                 *area = new_area;
                 todo!("Vertical layout");
             }
+            Self::TabSet(set, focused, area) => {
+                *area = new_area;
+                set[*focused].set_area(Area {
+                    x: new_area.x,
+                    y: new_area.y + 1,
+                    w: new_area.w,
+                    h: new_area.h - 1,
+                });
+            }
         }
     }
 
     fn area(&self) -> Area {
         match self {
             Self::Window(w) => w.area(),
-            Self::Horizontal(_, _, a) | Self::Vertical(_, _, a) => *a,
+            Self::Horizontal(_, _, a) | Self::Vertical(_, _, a) | Self::TabSet(_, _, a) => *a,
         }
     }
 
@@ -118,6 +301,22 @@ impl Renderable for WindowSet {
             Self::Window(w) => w.draw(term),
             Self::Vertical(set, _, _) | Self::Horizontal(set, _, _) => {
                 set.iter_mut().map(|w| w.draw(term)).collect()
+            }
+            Self::TabSet(set, focused, area) => {
+                term.queue(SetBackgroundColor(Color::DarkGrey))?;
+                area.top(1).clear(term)?;
+                area.pos().move_cursor(term)?;
+                for (i, s) in set.iter().enumerate() {
+                    let buf = s.buffer().read();
+                    let style = if i == *focused {
+                        ContentStyle::new().with(Color::Yellow)
+                    } else {
+                        ContentStyle::new().with(Color::White)
+                    };
+                    write!(term, "{}", style.apply(format_args!(" {} ", buf.title())))?;
+                }
+                term.queue(SetBackgroundColor(Color::Reset))?;
+                set[*focused].draw(term)
             }
         }
     }
@@ -156,7 +355,7 @@ impl Vim {
         }
         Self {
             args,
-            windows: WindowSet::Window(Window::new(buffers[0].clone())),
+            windows: WindowSet::from(&buffers),
             buffers,
             floating: vec![],
             size: (0, 0),
@@ -187,6 +386,27 @@ impl Vim {
         let win = self.get_focus_mut();
         win.set_mode(mode);
         win
+    }
+
+    pub fn move_focus(&mut self, motion: Scroll) {
+        if self.focus == self.floating.len() {
+            self.windows.move_focus(motion);
+        } else {
+            todo!("Floating window motion")
+        }
+    }
+
+    pub fn select_focus(&mut self, criteria: impl BufferSelect) {
+        if self.windows.jump_to(&criteria) {
+            self.focus = self.floating.len();
+        } else {
+            for (i, w) in self.floating.iter().enumerate() {
+                if w.buffer_select(&criteria) {
+                    self.focus = i;
+                    break;
+                }
+            }
+        }
     }
 
     fn update_area(&mut self, size: (u16, u16)) {
@@ -220,8 +440,12 @@ impl Vim {
                 } else {
                     match self.state {
                         TerminalState::Window => match self.map_set.on_key(k, self.get_state()) {
-                            MapAction::Act(a) => a.run(self),
-                            MapAction::Wait => (),
+                            MapAction::Act(rep, a) => {
+                                for _ in 0..rep {
+                                    a.run(self);
+                                }
+                            },
+                            MapAction::Wait => info!("{:?}", self.map_set),
                             MapAction::None => self.get_focus_mut().on_key(k).run(self),
                         },
                         TerminalState::Cli => self.cli.on_key(k).run(self),
@@ -251,12 +475,13 @@ impl Vim {
         match self.state {
             TerminalState::Window => {
                 self.cursor = self.get_focus().cursor_pos();
+                Pos(self.size.0.saturating_sub(20) as usize, self.size.1.saturating_sub(1) as usize).move_cursor(&mut lock)?;
+                self.map_set.draw(&mut lock, self.get_state())?;
             }
             TerminalState::Cli => self.cursor = self.cli.cursor_pos(),
             TerminalState::Exit => (),
         }
         self.cursor.draw(&mut lock)?;
-        //self.message(format!("{:?}", self.cursor));
         Ok(())
     }
 
@@ -380,4 +605,5 @@ fn panic_cleanup(info: &std::panic::PanicInfo) {
     } else {
         error!("A Panic occured somewhere");
     }
+    error!("BT: {:?}", Backtrace::new());
 }

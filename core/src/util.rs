@@ -4,9 +4,9 @@
 // Distributed under terms of the MIT license.
 //
 
-use std::{io::Write, ops::{Add, AddAssign}};
+use std::{io::Write, ops::{Add, AddAssign}, fmt::Display};
 
-use crossterm::{QueueableCommand, cursor::MoveTo};
+use crossterm::{QueueableCommand, cursor::MoveTo, event::{KeyEvent, KeyCode, KeyModifiers}};
 
 use crate::Result;
 
@@ -31,11 +31,63 @@ impl Area {
         self.w
     }
 
+    pub fn top(&self, h: usize) -> Self {
+        Self {
+            x: self.x,
+            y: self.y,
+            w: self.w,
+            h,
+        }
+    }
+
+    pub fn bottom(&self, h: usize) -> Self {
+        Self {
+            x: self.x,
+            y: self.y + self.h - h,
+            w: self.w,
+            h,
+        }
+    }
+
+    pub fn left(&self, w: usize) -> Self {
+        Self {
+            x: self.x,
+            y: self.y,
+            w,
+            h: self.h,
+        }
+    }
+
+    pub fn right(&self, w: usize) -> Self {
+        Self {
+            x: self.x + self.w - w,
+            y: self.y,
+            w,
+            h: self.h,
+        }
+    }
+
     pub fn lines<'s>(&'s self) -> LineIter<'s> {
         LineIter {
             area: self,
             line: self.y,
         }
+    }
+
+    const SPACES: [u8; 100] = [b' '; 100];
+    pub fn clear<W: Write>(&self, term: &mut W) -> Result<()> {
+        for l in self.lines() {
+            l.move_cursor(term)?;
+            Self::clear_line(term, self.w)?;
+        }
+        Ok(())
+    }
+
+    pub fn clear_line<W: Write>(term: &mut W, mut width: usize) -> Result<()> {
+        while width > 0 {
+            width -= term.write(&Self::SPACES[0..width.min(Self::SPACES.len())])?;
+        }
+        Ok(())
     }
 }
 
@@ -90,6 +142,53 @@ impl AddAssign for Pos {
     fn add_assign(&mut self, rhs: Self) {
         self.0 += rhs.0;
         self.1 += rhs.1;
+    }
+}
+
+pub struct KeyDisplay(pub KeyEvent);
+
+impl KeyDisplay {
+    fn fmt_code(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0.code {
+            KeyCode::Backspace => write!(f, "<Bs>"),
+            KeyCode::Enter => write!(f, "<Ret>"),
+            KeyCode::Left => write!(f, "<Left>"),
+            KeyCode::Right => write!(f, "<Right>"),
+            KeyCode::Up => write!(f, "<Up>"),
+            KeyCode::Down => write!(f, "<Down>"),
+            KeyCode::Home => write!(f, "<Home>"),
+            KeyCode::End => write!(f, "<End>"),
+            KeyCode::PageUp => write!(f, "<PgUp>"),
+            KeyCode::PageDown => write!(f, "<PgDn>"),
+            KeyCode::Tab => write!(f, "<Tab>"),
+            KeyCode::BackTab => write!(f, "<S-Tab>"),
+            KeyCode::Delete => write!(f, "<Del>"),
+            KeyCode::Insert => write!(f, "<Ins>"),
+            KeyCode::F(n) => write!(f, "<F{}>", n),
+            KeyCode::Char(c) => write!(f, "{}", c),
+            KeyCode::Null => write!(f, "<0>"),
+            KeyCode::Esc => write!(f, "<Esc>"),
+        }
+    }
+}
+
+impl Display for KeyDisplay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let m = self.0.modifiers;
+        if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::ALT) {
+            write!(f, "<M-^")?;
+            self.fmt_code(f)?;
+            write!(f, ">")
+        } else if m.contains(KeyModifiers::CONTROL) {
+            write!(f, "^")?;
+            self.fmt_code(f)
+        } else if m.contains(KeyModifiers::ALT) {
+            write!(f, "<M-")?;
+            self.fmt_code(f)?;
+            write!(f, ">")
+        } else {
+            self.fmt_code(f)
+        }
     }
 }
 

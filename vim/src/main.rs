@@ -3,9 +3,15 @@
 // Copyright (C) 2022 matthew <matthew@matthew-VirtualBox>
 // Distributed under terms of the MIT license.
 //
-use vim_core::{Result, Curse};
 
-fn main() -> Result<()> {
-    env_logger::init();
-    Curse::stdout().run()
+use std::error::Error;
+
+use vim_core::Curse;
+use flexi_logger::{Logger, FileSpec};
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let tmp = Logger::try_with_env()?.log_to_file(FileSpec::try_from("./rvim.log")?).start()?;
+    Curse::stdout().run()?;
+    drop(tmp);
+    Ok(())
 }
