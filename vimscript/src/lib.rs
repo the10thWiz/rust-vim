@@ -1,16 +1,46 @@
+mod namespace;
+mod value;
+mod expr;
 
+use expr::ValueError;
+use namespace::NamespaceError;
+
+use crate::value::VimFunction;
+use crate::value::Function;
+use crate::value::Value;
+use crate::namespace::NameSpaced;
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::collections::{HashMap, LinkedList};
 
 #[derive(Debug)]
 pub enum VimError {
     UnexpectedKeyword(&'static str),
     UnexpectedEof,
     Exit,
+    InvalidParams,
+    Expected(&'static str),
+    NamespaceError(NamespaceError),
+    ValError(ValueError),
+    VariableUndefined,
+}
+
+impl From<NamespaceError> for VimError {
+    fn from(n: NamespaceError) -> Self {
+        Self::NamespaceError(n)
+    }
+}
+impl From<ValueError> for VimError {
+    fn from(n: ValueError) -> Self {
+        Self::ValError(n)
+    }
 }
 
 pub trait Command<S> {
     fn execute(&self, range: CmdRange<'_>, bang: bool, commands: &str, state: &mut S);
+}
+
+pub trait BuiltinFunction<S> {
+    fn execute(&self, args: Vec<Value>, state: &mut S);
 }
 
 pub enum CmdRange<'a> {
@@ -18,24 +48,7 @@ pub enum CmdRange<'a> {
     Select(&'a str),
     RangeFrom(usize),
     RangeTo(usize),
-    Range {
-        start: usize,
-        end: usize,
-    },
-}
-
-pub struct VimFunction {
-    params: Vec<String>,
-    inner: Vec<LineOwned>,
-}
-
-pub enum Value {
-    Integer(isize),
-    Number(f64),
-    Str(String),
-    Object(HashMap<String, Value>),
-    List(LinkedList<Value>),
-    Function(Vec<String>),
+    Range { start: usize, end: usize },
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -56,12 +69,16 @@ enum RunTy<'a> {
 
 pub struct VimScriptCtx<S> {
     commands: HashMap<String, Arc<dyn Command<S>>>,
+    functions: NameSpaced<Function<S>>,
+    variables: NameSpaced<Value>,
 }
 
 impl<S> VimScriptCtx<S> {
     pub fn init() -> Self {
         Self {
             commands: HashMap::new(),
+            functions: NameSpaced::default(),
+            variables: NameSpaced::default(),
         }
     }
 
@@ -73,40 +90,65 @@ impl<S> VimScriptCtx<S> {
         }
     }
 
-    fn run_inner(&mut self, script: &mut Tokenizer, section: Section, mut run: RunTy<'_>) -> Result<(), VimError> {
+    fn run_inner(
+        &mut self,
+        script: &mut Tokenizer,
+        section: Section,
+        mut run: RunTy<'_>,
+    ) -> Result<(), VimError> {
         while let Some(line) = script.next() {
             match line.command {
                 "if" => (),
                 "elseif" => (),
-                "else" => if section == Section::If {
-                    if matches!(run, RunTy::Skip) {
-                        self.run_inner(script, Section::If, RunTy::Now)?;
+                "else" => {
+                    if section == Section::If {
+                        if matches!(run, RunTy::Skip) {
+                            self.run_inner(script, Section::If, RunTy::Now)?;
+                        }
+                    } else {
+                        return Err(VimError::UnexpectedKeyword("else"));
                     }
-                } else {
-                    return Err(VimError::UnexpectedKeyword("else"));
-                },
-                "endif" => if section == Section::If {
-                    return Ok(());
-                } else {
-                    return Err(VimError::UnexpectedKeyword("endif"));
-                },
+                }
+                "endif" => {
+                    if section == Section::If {
+                        return Ok(());
+                    } else {
+                        return Err(VimError::UnexpectedKeyword("endif"));
+                    }
+                }
                 "for" => (),
-                "endfor" => if section == Section::For {
-                    return Ok(());
-                } else {
-                    return Err(VimError::UnexpectedKeyword("endfor"));
-                },
+                "endfor" => {
+                    if section == Section::For {
+                        return Ok(());
+                    } else {
+                        return Err(VimError::UnexpectedKeyword("endfor"));
+                    }
+                }
                 "while" => (),
-                "endwhile" => if section == Section::While {
-                    return Ok(());
-                } else {
-                    return Err(VimError::UnexpectedKeyword("endwhile"));
-                },
+                "endwhile" => {
+                    if section == Section::While {
+                        return Ok(());
+                    } else {
+                        return Err(VimError::UnexpectedKeyword("endwhile"));
+                    }
+                }
                 "function" => (),
-                "endfunction" => if section == Section::Function {
-                    return Ok(());
-                } else {
-                    return Err(VimError::UnexpectedKeyword("endfunction"));
+                "endfunction" => {
+                    if section == Section::Function {
+                        return Ok(());
+                    } else {
+                        return Err(VimError::UnexpectedKeyword("endfunction"));
+                    }
+                }
+                "let" => {
+                    if line.range.is_some() || line.bang {
+                        return Err(VimError::InvalidParams);
+                    } else if let Some((name, val)) = line.params.split_once("=") {
+                        let val = self.eval(val)?;
+                        self.variables.insert(name.trim(), val)?;
+                    } else {
+                        return Err(VimError::Expected("="));
+                    }
                 },
                 "silent" => todo!("Run cmd & supress output"),
                 "execute" => todo!("Eval expression & run resulting script"),
@@ -126,6 +168,27 @@ impl<S> VimScriptCtx<S> {
             Err(VimError::UnexpectedEof)
         }
     }
+
+    pub fn eval(&mut self, expr: &str) -> Result<Value, VimError> {
+        expr::parse(expr.trim(), self)
+    }
+
+    fn get_func(&self, name: impl AsRef<str>) -> Option<&Function<S>> {
+        self.functions.get(name).ok().flatten()
+    }
+
+    pub fn lookup(&self, variable: impl AsRef<str>) -> Result<&Value, VimError> {
+        if variable.as_ref().starts_with("v:") {
+            match variable.as_ref() {
+                "v:true" => Ok(&Value::TRUE),
+                "v:false" => Ok(&Value::FALSE),
+                "v:null" => Ok(&Value::NULL),
+                _ => Err(VimError::VariableUndefined)
+            }
+        } else {
+            self.variables.get(variable)?.map_or(Err(VimError::VariableUndefined), Ok)
+        }
+    }
 }
 
 struct Tokenizer<'a> {
@@ -135,13 +198,16 @@ struct Tokenizer<'a> {
 impl<'a> Tokenizer<'a> {
     fn get_next(&mut self) -> Option<Line<'a>> {
         let mut last = ' ';
-        let (line, next) = self.script.split_once(|c: char| {
-            let result = (last != '\\' && c == '\n') || c == '|';
-            if !c.is_whitespace() {
-                last = c;
-            }
-            return result;
-        }).unwrap_or((self.script, ""));
+        let (line, next) = self
+            .script
+            .split_once(|c: char| {
+                let result = (last != '\\' && c == '\n') || c == '|';
+                if !c.is_whitespace() {
+                    last = c;
+                }
+                return result;
+            })
+            .unwrap_or((self.script, ""));
         self.script = next.trim();
         Line::new(line.trim())
     }
@@ -175,19 +241,22 @@ impl<'a> Line<'a> {
         if !bang && command.is_empty() {
             return None;
         }
-        Some(
-            Self {
-                range, command, bang, params
-            }
-        )
+        Some(Self {
+            range,
+            command,
+            bang,
+            params,
+        })
     }
 
     pub fn split_range<'b>(line: &'b str) -> (Option<&'b str>, &'b str) {
-        line.split_once(|c: char| c.is_alphanumeric()).map_or((None, line), |(a, b)| (Some(a), b))
+        line.split_once(|c: char| c.is_alphanumeric())
+            .map_or((None, line), |(a, b)| (Some(a), b))
     }
 
     pub fn split_command<'b>(line: &'b str) -> (&'b str, &'b str) {
-        line.split_once(|c: char| !c.is_alphanumeric()).unwrap_or((line, ""))
+        line.split_once(|c: char| !c.is_alphanumeric())
+            .unwrap_or((line, ""))
     }
 
     pub fn split_bang<'b>(line: &'b str) -> (bool, &'b str) {
@@ -213,4 +282,15 @@ struct LineOwned {
     command: String,
     bang: bool,
     params: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    pub struct TestContext;
+
+    pub fn test_ctx() -> VimScriptCtx<TestContext> {
+        VimScriptCtx::init()
+    }
 }
