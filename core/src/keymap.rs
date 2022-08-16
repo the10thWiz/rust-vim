@@ -147,6 +147,7 @@ impl KeyMap {
                 _ => (),
             }
         }
+        self.clear();
         MapAction::None
     }
 
@@ -274,13 +275,13 @@ impl MapSet {
                 win.cursor_apply(Motion::SetCol(col));
             },
             'd' => |v| {
-                v.set_mode(WinMode::Operation(Op::Delete));
+                v.set_mode(WinMode::Operation(Op::delete()));
             },
             'y' => |v| {
-                v.set_mode(WinMode::Operation(Op::Yank));
+                v.set_mode(WinMode::Operation(Op::yank()));
             },
             'r' => |v| {
-                v.set_mode(WinMode::Operation(Op::Replace));
+                v.set_mode(WinMode::Operation(Op::replace()));
             },
             'R' => |v| {
                 v.set_mode(WinMode::Replace);
@@ -364,8 +365,16 @@ impl MapSet {
         if self.last != state {
             self.map[self.last].clear();
         }
-        self.last = state;
-        self.map[state].on_key(k)
+        if state != State::Operator {
+            self.last = state;
+        }
+        if state == State::Operator {
+            MapAction::Act(self.map[self.last].rep.max(0), Arc::new(move |v: &mut Vim| {
+                v.get_focus_mut().run_operation(k);
+            }))
+        } else {
+            self.map[state].on_key(k)
+        }
     }
 
     pub fn draw<W: Write>(&self, term: &mut W, state: State) -> Result<()> {

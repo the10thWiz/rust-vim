@@ -4,20 +4,36 @@
 // Distributed under terms of the MIT license.
 //
 
+use crate::expr::ValueError;
 use crate::BuiltinFunction;
 use crate::LineOwned;
 use crate::VimError;
 use crate::VimScriptCtx;
+use std::borrow::Cow;
+use std::collections::hash_map;
+use std::collections::linked_list;
 use std::collections::{HashMap, LinkedList};
+use std::fmt::Display;
+use std::str::Chars;
+use std::sync::Arc;
 
 pub struct VimFunction {
     params: Vec<String>,
     pub(crate) inner: Vec<LineOwned>,
 }
 
+impl VimFunction {
+    pub fn new(params: Vec<String>) -> Self {
+        Self {
+            params,
+            inner: vec![],
+        }
+    }
+}
+
 pub enum Function<S> {
     VimScript(VimFunction),
-    Builtin(Box<dyn BuiltinFunction<S>>),
+    Builtin(Arc<dyn BuiltinFunction<S>>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -29,9 +45,18 @@ pub enum Value {
     Object(HashMap<String, Value>),
     List(LinkedList<Value>),
     Function(String),
+    Nil,
 }
 
 impl Value {
+    pub fn str(s: impl Into<String>) -> Self {
+        Self::Str(s.into())
+    }
+
+    pub fn list<S: Into<Value>>(l: impl IntoIterator<Item = S>) -> Self {
+        Self::List(l.into_iter().map(|s| s.into()).collect())
+    }
+
     pub const TRUE: Self = Value::Bool(true);
     pub const FALSE: Self = Value::Bool(false);
     pub const NULL: Self = Value::Integer(0);
@@ -54,6 +79,14 @@ impl Value {
             Ok(Self::Integer(i))
         } else if let Ok(i) = s.parse() {
             Ok(Self::Number(i))
+        } else if let Some(s) = s.strip_prefix("0x") {
+            isize::from_str_radix(s, 16)
+                .map_err(|_| VimError::ValError(ValueError::UnexpectedSymbol))
+                .map(Self::Integer)
+        } else if let Some(s) = s.strip_prefix("0o") {
+            isize::from_str_radix(s, 8)
+                .map_err(|_| VimError::ValError(ValueError::UnexpectedSymbol))
+                .map(Self::Integer)
         } else {
             todo!("Invalid number")
         }
@@ -68,6 +101,7 @@ impl Value {
             Value::Object(o) => !o.is_empty(),
             Value::List(l) => !l.is_empty(),
             Value::Function(f) => ctx.get_func(f).is_some(),
+            Value::Nil => false,
         }
     }
 
@@ -80,6 +114,7 @@ impl Value {
             Value::Object(_o) => format!("{{}}"),
             Value::List(_l) => format!("[]"),
             Value::Function(f) => format!("{f}"),
+            Value::Nil => format!("v:null"),
         }
     }
 
@@ -98,6 +133,7 @@ impl Value {
             Value::Object(_o) => todo!(),
             Value::List(_l) => todo!(),
             Value::Function(_f) => todo!(),
+            Value::Nil => 0,
         }
     }
 
@@ -116,6 +152,7 @@ impl Value {
             Value::Object(_o) => todo!(),
             Value::List(_l) => todo!(),
             Value::Function(_f) => todo!(),
+            Value::Nil => 0.,
         }
     }
 
@@ -154,44 +191,178 @@ impl Value {
             _ => None,
         }
     }
-}
 
-impl std::ops::Add for Value {
-    type Output = Self;
-    fn add(self, rhs: Self) -> Self::Output {
+    pub fn add<S>(self, rhs: Self, ctx: &VimScriptCtx<S>) -> Self {
         match (self, rhs) {
             (Self::Integer(l), Self::Integer(r)) => Self::Integer(l + r),
-            _ => todo!("Addition"),
+            (l, r) => Self::Number(l.to_num(ctx) + r.to_num(ctx)),
         }
     }
-}
 
-impl std::ops::Sub for Value {
-    type Output = Self;
-    fn sub(self, rhs: Self) -> Self::Output {
+    pub fn sub<S>(self, rhs: Self, ctx: &VimScriptCtx<S>) -> Self {
         match (self, rhs) {
             (Self::Integer(l), Self::Integer(r)) => Self::Integer(l - r),
-            _ => todo!("Subtraction"),
+            (l, r) => Self::Number(l.to_num(ctx) - r.to_num(ctx)),
         }
     }
-}
 
-impl std::ops::Mul for Value {
-    type Output = Self;
-    fn mul(self, rhs: Self) -> Self::Output {
+    pub fn neg<S>(self, ctx: &VimScriptCtx<S>) -> Self {
+        match self {
+            Self::Integer(r) => Self::Integer(-r),
+            r => Self::Number(-r.to_num(ctx)),
+        }
+    }
+
+    pub fn abs<S>(self, ctx: &VimScriptCtx<S>) -> Self {
+        match self {
+            Self::Integer(r) => Self::Integer(r.abs()),
+            r => Self::Number(r.to_num(ctx).abs()),
+        }
+    }
+
+    pub fn not<S>(self, ctx: &VimScriptCtx<S>) -> Self {
+        Self::Bool(!self.to_bool(ctx))
+    }
+
+    pub fn mul<S>(self, rhs: Self, ctx: &VimScriptCtx<S>) -> Self {
         match (self, rhs) {
             (Self::Integer(l), Self::Integer(r)) => Self::Integer(l * r),
-            _ => todo!("Multiplication"),
+            (l, r) => Self::Number(l.to_num(ctx) * r.to_num(ctx)),
+        }
+    }
+
+    pub fn div<S>(self, rhs: Self, ctx: &VimScriptCtx<S>) -> Self {
+        match (self, rhs) {
+            (Self::Integer(l), Self::Integer(r)) => Self::Integer(l / r),
+            (l, r) => Self::Number(l.to_num(ctx) / r.to_num(ctx)),
+        }
+    }
+
+    pub fn concat<S>(self, rhs: Self, _ctx: &VimScriptCtx<S>) -> Self {
+        Self::Str(format!("{}{}", self, rhs))
+    }
+
+    pub fn less<S>(self, rhs: Self, _ctx: &VimScriptCtx<S>) -> Self {
+        match (self, rhs) {
+            (Self::Integer(l), Self::Integer(r)) => Self::Bool(l < r),
+            (Self::Number(l), Self::Number(r)) => Self::Bool(l < r),
+            (Self::Str(l), Self::Str(r)) => Self::Bool(l < r),
+            _ => Self::Bool(false),
+        }
+    }
+
+    pub fn equal<S>(self, rhs: Self, _ctx: &VimScriptCtx<S>) -> Self {
+        Self::Bool(self == rhs)
+    }
+
+    pub fn index<S>(&self, idx: Self, ctx: &VimScriptCtx<S>) -> Self {
+        match self {
+            Self::List(l) => {
+                let idx = idx.to_int(ctx);
+                if idx < 0 {
+                    l.iter()
+                        .rev()
+                        .nth((1 - idx) as usize)
+                        .unwrap_or(&Self::Nil)
+                        .clone()
+                } else {
+                    l.iter().nth(idx as usize).unwrap_or(&Self::Nil).clone()
+                }
+            }
+            Self::Str(s) => {
+                let idx = idx.to_int(ctx);
+                if idx < 0 {
+                    s.chars()
+                        .rev()
+                        .nth((1 - idx) as usize)
+                        .map(|c| Self::Str(format!("{c}")))
+                        .unwrap_or(Self::Nil)
+                } else {
+                    s.chars()
+                        .nth(idx as usize)
+                        .map(|c| Self::Str(format!("{c}")))
+                        .unwrap_or(Self::Nil)
+                }
+            }
+            Self::Object(m) => m.get(&idx.to_string(ctx)).unwrap_or(&Self::Nil).clone(),
+            _ => todo!(),
+        }
+    }
+
+    pub fn into_iter(self) -> ValueIter {
+        match self {
+            Self::List(l) => ValueIter::List(l.into_iter()),
+            Self::Object(m) => ValueIter::Object(m.into_iter()),
+            Self::Str(s) => ValueIter::Str(s, 0),
+            _ => ValueIter::Empty,
         }
     }
 }
 
-impl std::ops::Div for Value {
-    type Output = Self;
-    fn div(self, rhs: Self) -> Self::Output {
-        match (self, rhs) {
-            (Self::Integer(l), Self::Integer(r)) => Self::Integer(l / r),
-            _ => todo!("Division"),
+pub enum ValueIter {
+    Empty,
+    List(linked_list::IntoIter<Value>),
+    Object(hash_map::IntoIter<String, Value>),
+    Str(String, usize),
+}
+
+impl Iterator for ValueIter {
+    type Item = Value;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Empty => None,
+            Self::List(l) => l.next(),
+            Self::Object(m) => m.next().map(|(k, v)| Value::list([Value::Str(k), v])),
+            Self::Str(s, idx) => {
+                if let Some(c) = s[*idx..].chars().next() {
+                    *idx += c.len_utf8();
+                    Some(Value::Str(format!("{c}")))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+impl Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::Integer(i) => write!(f, "{}", i),
+            Value::Number(n) => write!(f, "{}", n),
+            Value::Str(s) => write!(f, "{}", s),
+            Value::Bool(b) => write!(f, "{}", b),
+            Value::Object(_) => write!(f, "{{ -- }}"),
+            Value::List(_) => write!(f, "[ -- ]"),
+            Value::Function(name) => write!(f, "<Function@{}>", name),
+            Value::Nil => write!(f, "v:null"),
+        }
+    }
+}
+
+pub enum Names<'a> {
+    Single(&'a str),
+    List(Vec<Names<'a>>),
+    Object(Vec<(&'a str, Names<'a>)>),
+}
+
+impl<'a> Names<'a> {
+    pub fn parse(s: &'a str) -> Result<(Self, &'a str), VimError> {
+        if let Some(rem) = s.strip_prefix('[') {
+            todo!("Array destructure")
+        } else if let Some(rem) = s.strip_prefix('{') {
+            todo!("Object destructure")
+        } else if let Some(idx) = s.find(|c: char| !c.is_alphanumeric()) {
+            Ok((Self::Single(&s[..idx]), &s[idx..]))
+        } else {
+            Err(VimError::Expected("in"))
+        }
+    }
+
+    pub fn iter(&self, v: Value, mut f: impl FnMut(&'a str, Value) -> Result<(), VimError>) -> Result<(), VimError> {
+        match self {
+            Self::Single(name) => f(name, v),
+            _ => todo!("Iterate over lists & objects"),
         }
     }
 }

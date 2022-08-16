@@ -4,7 +4,7 @@
 // Distributed under terms of the MIT license.
 //
 
-use crate::{buffer::BufferRead, Area, Result};
+use crate::{buffer::BufferRead, Area, Result, util::Pos};
 use crossterm::{
     cursor::{MoveTo, SetCursorShape},
     QueueableCommand,
@@ -92,5 +92,9 @@ impl Cursor {
         term.queue(MoveTo(self.x as u16, self.y as u16))?;
         term.queue(SetCursorShape(self.ty))?;
         Ok(())
+    }
+
+    pub fn pos(&self) -> Pos {
+        Pos(self.x, self.y)
     }
 }

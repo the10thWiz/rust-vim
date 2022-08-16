@@ -4,8 +4,10 @@
 // Distributed under terms of the MIT license.
 //
 
+use crate::buffer::BufferWrite;
 use std::io::Write;
 use std::ops::Deref;
+use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind, MouseButton};
 use crossterm::Result;
@@ -57,22 +59,61 @@ impl Default for WindowProps {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Op {
-    Delete,
-    Yank,
-    Replace,
+pub(crate) mod Op {
+    use std::sync::Arc;
+    use crossterm::event::KeyEvent;
+
+    use super::{Operation, Window};
+
+    pub fn delete() -> Arc<dyn Operation> {
+        Arc::new(DeleteOp)
+    }
+
+    struct DeleteOp;
+    impl Operation for DeleteOp {
+        fn run(&self, window: &mut Window, key: KeyEvent) {
+            let start = window.cursor().pos();
+
+            todo!()
+        }
+    }
+
+    pub fn yank() -> Arc<dyn Operation> {
+        Arc::new(DeleteOp)
+    }
+
+    pub fn replace() -> Arc<dyn Operation> {
+        Arc::new(DeleteOp)
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub trait Operation {
+    fn run(&self, window: &mut Window, key: KeyEvent);
+}
+
+#[derive(Clone)]
 pub enum WinMode {
     Normal,
-    Operation(Op),
+    Operation(Arc<dyn Operation>),
     Insert,
     Replace,
     Visual,
     VisualLine,
     VisualBlock,
+}
+
+impl std::fmt::Debug for WinMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Normal => write!(f, "Normal"),
+            Self::Operation(_) => write!(f, "Operation"),
+            Self::Insert => write!(f, "Insert"),
+            Self::Replace => write!(f, "Replace"),
+            Self::Visual => write!(f, "Visual"),
+            Self::VisualLine => write!(f, "VisualLine"),
+            Self::VisualBlock => write!(f, "VisualBlock"),
+        }
+    }
 }
 
 impl WinMode {
@@ -166,8 +207,9 @@ impl Window {
     }
 
     pub fn cursor_apply(&mut self, motion: Motion) -> &mut Self {
+        let old_cursor = self.cursor;
         self.cursor
-            .apply(motion, &self.buffer.read(), self.mode == WinMode::Insert);
+            .apply(motion, &self.buffer.read(), matches!(self.mode, WinMode::Insert));
         if self.cursor.row() < self.buffer_view.buffer_row {
             self.buffer_view.buffer_row = self.cursor.row();
             self.on_scroll();
@@ -189,6 +231,12 @@ impl Window {
             self.on_scroll();
         }
         self
+    }
+
+    pub fn run_operation(&mut self, key_event: KeyEvent) {
+        if let WinMode::Operation(op) = std::mem::replace(&mut self.mode, WinMode::Normal) {
+            op.run(self, key_event);
+        }
     }
 
     fn on_scroll(&mut self) {
@@ -256,13 +304,13 @@ impl Window {
         }
     }
 
-    pub fn mode(&self) -> WinMode {
-        self.mode
+    pub fn mode(&self) -> &WinMode {
+        &self.mode
     }
 
     pub fn set_mode(&mut self, mode: WinMode) -> &mut Self {
         self.cursor.set_shape(mode.get_shape());
-        if self.mode == WinMode::Insert {
+        if matches!(self.mode, WinMode::Insert) {
             self.cursor_apply(Motion::Left);
         }
         self.mode = mode;
@@ -456,11 +504,11 @@ impl EventReader for Window {
         match code {
             KeyCode::Char(c) => {
                 if self.mode.insert() && modifiers & !KeyModifiers::SHIFT == KeyModifiers::NONE {
-                    if self.mode == WinMode::Insert {
+                    if matches!(self.mode, WinMode::Insert) {
                         self.buffer
                             .write()
                             .insert_char(self.cursor.row(), self.cursor.col(), c);
-                    } else if self.mode == WinMode::Replace {
+                    } else if matches!(self.mode, WinMode::Replace) {
                         self.buffer
                             .write()
                             .replace_char(self.cursor.row(), self.cursor.col(), c);
@@ -530,9 +578,9 @@ impl EventReader for Window {
                 self.cursor_apply(Motion::Start);
             }
             KeyCode::Insert => {
-                if self.mode == WinMode::Insert {
+                if matches!(self.mode, WinMode::Insert) {
                     self.set_mode(WinMode::Replace);
-                } else if self.mode == WinMode::Replace {
+                } else if matches!(self.mode, WinMode::Replace) {
                     self.set_mode(WinMode::Insert);
                 } else {
                     self.set_mode(WinMode::Insert);
