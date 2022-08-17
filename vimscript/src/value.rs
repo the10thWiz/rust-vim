@@ -4,19 +4,19 @@
 // Distributed under terms of the MIT license.
 //
 
+use crate::State;
 use crate::expr::ValueError;
 use crate::BuiltinFunction;
 use crate::LineOwned;
 use crate::VimError;
 use crate::VimScriptCtx;
-use std::borrow::Cow;
 use std::collections::hash_map;
 use std::collections::linked_list;
 use std::collections::{HashMap, LinkedList};
 use std::fmt::Display;
-use std::str::Chars;
 use std::sync::Arc;
 
+#[derive(Debug)]
 pub struct VimFunction {
     params: Vec<String>,
     pub(crate) inner: Vec<LineOwned>,
@@ -92,7 +92,7 @@ impl Value {
         }
     }
 
-    pub fn to_bool<S>(&self, ctx: &VimScriptCtx<S>) -> bool {
+    pub fn to_bool<S: State>(&self, ctx: &VimScriptCtx<S>) -> bool {
         match self {
             Value::Integer(i) => *i != 0,
             Value::Number(n) => *n != 0.,
@@ -185,7 +185,7 @@ impl Value {
         }
     }
 
-    pub fn get_func<'a, S>(&self, ctx: &'a VimScriptCtx<S>) -> Option<&'a Function<S>> {
+    pub fn get_func<'a, S: State>(&self, ctx: &'a VimScriptCtx<S>) -> Option<&'a Function<S>> {
         match self {
             Value::Function(f) => ctx.get_func(f),
             _ => None,
@@ -220,7 +220,7 @@ impl Value {
         }
     }
 
-    pub fn not<S>(self, ctx: &VimScriptCtx<S>) -> Self {
+    pub fn not<S: State>(self, ctx: &VimScriptCtx<S>) -> Self {
         Self::Bool(!self.to_bool(ctx))
     }
 

@@ -1,6 +1,7 @@
 mod expr;
 mod namespace;
 mod value;
+pub mod builtin;
 
 use expr::ValueError;
 use namespace::NamespaceError;
@@ -34,6 +35,7 @@ pub enum VimError {
     FunctionUndefined,
     CommandUndefined,
     TimeOut,
+    WrongArgCount,
 }
 
 impl From<NamespaceError> for VimError {
@@ -59,7 +61,7 @@ pub trait Command<S> {
 }
 
 pub trait BuiltinFunction<S> {
-    fn execute(&self, args: Vec<Value>, ctx: &mut VimScriptCtx<S>, state: &mut S) -> Value;
+    fn execute(&self, args: Vec<Value>, ctx: &mut VimScriptCtx<S>, state: &mut S) -> Result<Value, VimError>;
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -127,6 +129,7 @@ enum Section {
     For,
 }
 
+#[derive(Debug)]
 enum RunTy<'a> {
     Now,
     Skip,
@@ -174,12 +177,12 @@ impl<S: State> VimScriptCtx<S> {
         }
     }
 
-    pub fn run(&mut self, script: &str, state: &mut S) {
+    pub fn run(&mut self, script: &str, state: &mut S) -> Result<(), VimError> {
         self.timeout = Instant::now() + Duration::from_secs(5);
         let mut script = Tokenizer { script };
         match self.run_inner(&mut script, Section::Script, RunTy::Now, state) {
-            Ok(()) | Err(VimError::Exit) => (),
-            Err(e) => todo!("Handle Error {e:?}"),
+            Ok(()) | Err(VimError::Exit) => Ok(()),
+            Err(e) => Err(e),
         }
     }
 
@@ -194,7 +197,7 @@ impl<S: State> VimScriptCtx<S> {
             if self.timeout < Instant::now() {
                 return Err(VimError::TimeOut);
             }
-            self.run_line(script, line, section, run, state)?;
+            self.run_line(script, line, section, &mut run, state)?;
         }
         if section == Section::Script {
             Ok(())
@@ -208,11 +211,11 @@ impl<S: State> VimScriptCtx<S> {
         script: &mut Tokenizer,
         line: Line,
         section: Section,
-        mut run: RunTy<'_>,
+        run: &mut RunTy<'_>,
         state: &mut S,
         ) -> Result<(), VimError> {
         match line.command {
-            "if" => match &mut run {
+            "if" => match run {
                 RunTy::Skip | RunTy::SkipEndIf => {
                     self.run_inner(script, Section::If, RunTy::SkipEndIf, state)?
                 }
@@ -227,18 +230,18 @@ impl<S: State> VimScriptCtx<S> {
             },
             "elseif" => {
                 if section == Section::If {
-                    match &mut run {
+                    match run {
                         RunTy::Function(f) => f.inner.push(line.to_owned()),
                         RunTy::SkipEndIf => (),
                         RunTy::Skip => {
                             if self.eval(line.params, state)?.to_bool(self) {
-                                run = RunTy::Now;
+                                *run = RunTy::Now;
                             } else {
-                                run = RunTy::SkipEndIf;
+                                *run = RunTy::SkipEndIf;
                             }
                         }
                         RunTy::Now => {
-                            run = RunTy::SkipEndIf;
+                            *run = RunTy::SkipEndIf;
                         }
                     }
                 } else {
@@ -247,14 +250,14 @@ impl<S: State> VimScriptCtx<S> {
             }
             "else" => {
                 if section == Section::If {
-                    match &mut run {
+                    match run {
                         RunTy::Function(f) => f.inner.push(line.to_owned()),
                         RunTy::SkipEndIf => (),
                         RunTy::Skip => {
-                            run = RunTy::Now;
+                            *run = RunTy::Now;
                         }
                         RunTy::Now => {
-                            run = RunTy::SkipEndIf;
+                            *run = RunTy::SkipEndIf;
                         }
                     }
                 } else {
@@ -340,11 +343,11 @@ impl<S: State> VimScriptCtx<S> {
                     Err(VimError::Expected("="))
                 }
             })?,
-            "silent" => run.act(line, |full_line|{
+            "silent" => run.act(line, |full_line| {
                 if let Some(line) = Line::new(full_line.params)? {
                     self.silence_level += 1;
                     state.set_silent(self.silence_level > 0);
-                    self.run_line(script, line, section, run, state)?;
+                    self.run_line(script, line, section, &mut RunTy::Now, state)?;
                     state.set_silent(self.silence_level > 0);
                     self.silence_level -= 1;
                 }
@@ -376,7 +379,7 @@ impl<S: State> VimScriptCtx<S> {
     ) -> Result<Value, VimError> {
         match self.get_func(f) {
             Some(Function::VimScript(_f)) => todo!("Vimscript Functions"),
-            Some(Function::Builtin(f)) => Ok(f.clone().execute(args, self, state)),
+            Some(Function::Builtin(f)) => f.clone().execute(args, self, state),
             None => Err(VimError::FunctionUndefined),
         }
     }
@@ -580,6 +583,7 @@ mod tests {
 
     impl State for TestContext {
         fn set_silent(&mut self, _s: bool) { }
+        fn echo(&mut self, _msg: Arguments) { }
     }
 
     pub fn test_ctx() -> VimScriptCtx<TestContext> {

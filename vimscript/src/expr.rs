@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, LinkedList};
 
-use crate::{value::Value, VimError, VimScriptCtx};
+use crate::{value::Value, VimError, VimScriptCtx, State};
 
 #[derive(Debug)]
 pub enum ValueError {
@@ -72,7 +72,7 @@ impl<'a> ExprPeice<'a> {
     }
 }
 
-pub fn parse<S>(
+pub fn parse<S: State>(
     mut expr: &str,
     ctx: &mut VimScriptCtx<S>,
     state: &mut S,
@@ -238,7 +238,7 @@ fn function_call_extract(tokens: &mut Vec<ExprPeice>) -> bool {
     changed
 }
 
-fn function_calls<S>(
+fn function_calls<S: State>(
     tokens: &mut Vec<ExprPeice>,
     ctx: &mut VimScriptCtx<S>,
     state: &mut S,
@@ -357,8 +357,8 @@ mod tests {
     struct NargFn<const N: usize, S>(Box<dyn Fn([Value; N], &mut VimScriptCtx<S>) -> Value>);
 
     impl<const N: usize, S> BuiltinFunction<S> for NargFn<N, S> {
-        fn execute(&self, args: Vec<Value>, ctx: &mut VimScriptCtx<S>, _s: &mut S) -> Value {
-            self.0(args.try_into().expect("Incorrect number of arguments"), ctx)
+        fn execute(&self, args: Vec<Value>, ctx: &mut VimScriptCtx<S>, _s: &mut S) -> Result<Value, VimError> {
+            Ok(self.0(args.try_into().expect("Incorrect number of arguments"), ctx))
         }
     }
 
