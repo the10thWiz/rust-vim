@@ -4,10 +4,13 @@
 // Distributed under terms of the MIT license.
 //
 
-use crate::State;
 use crate::expr::ValueError;
 use crate::BuiltinFunction;
 use crate::LineOwned;
+use crate::RunTy;
+use crate::Section;
+use crate::State;
+use crate::Tokenizer;
 use crate::VimError;
 use crate::VimScriptCtx;
 use std::collections::hash_map;
@@ -29,10 +32,28 @@ impl VimFunction {
             inner: vec![],
         }
     }
+
+    pub fn execute<S: State>(
+        &self,
+        args: Vec<Value>,
+        ctx: &mut VimScriptCtx<S>,
+        state: &mut S,
+    ) -> Result<Value, VimError> {
+        for (name, val) in self
+            .params
+            .iter()
+            .zip(args.into_iter().chain(std::iter::repeat(Value::Nil)))
+        {
+            ctx.insert_var(name, val)?;
+        }
+        let mut script = Tokenizer::from_iter(self.inner.iter());
+        ctx.run_inner(&mut script, Section::Function, RunTy::Now, state)
+            .map(|v| v.unwrap_or(Value::Nil))
+    }
 }
 
 pub enum Function<S> {
-    VimScript(VimFunction),
+    VimScript(Arc<VimFunction>),
     Builtin(Arc<dyn BuiltinFunction<S>>),
 }
 
@@ -92,7 +113,7 @@ impl Value {
         }
     }
 
-    pub fn to_bool<S: State>(&self, ctx: &VimScriptCtx<S>) -> bool {
+    pub fn to_bool<S: State + 'static>(&self, ctx: &VimScriptCtx<S>) -> bool {
         match self {
             Value::Integer(i) => *i != 0,
             Value::Number(n) => *n != 0.,
@@ -105,16 +126,30 @@ impl Value {
         }
     }
 
-    pub fn to_string<S>(&self, _ctx: &VimScriptCtx<S>) -> String {
+    pub fn to_string<S>(&self, ctx: &VimScriptCtx<S>) -> String {
         match self {
             Value::Integer(i) => format!("{i}"),
             Value::Number(n) => format!("{n}"),
-            Value::Str(s) => format!("{s}"),
+            Value::Str(s) => s.to_string(),
             Value::Bool(b) => format!("{b}"),
-            Value::Object(_o) => format!("{{}}"),
-            Value::List(_l) => format!("[]"),
-            Value::Function(f) => format!("{f}"),
-            Value::Nil => format!("v:null"),
+            Value::Object(o) => std::iter::once("{".to_string())
+                .chain(
+                    o.iter()
+                        .flat_map(|(n, v)| [n.clone(), ":".to_string(), v.to_string(ctx)].into_iter())
+                        .intersperse(",".to_string()),
+                )
+                .chain(std::iter::once("}".to_string()))
+                .collect(),
+            Value::List(l) => std::iter::once("[".to_string())
+                .chain(
+                    l.iter()
+                        .map(|v| v.to_string(ctx))
+                        .intersperse(",".to_string()),
+                )
+                .chain(std::iter::once("]".to_string()))
+                .collect(),
+            Value::Function(f) => f.clone(),
+            Value::Nil => "v:null".to_string(),
         }
     }
 
@@ -185,7 +220,10 @@ impl Value {
         }
     }
 
-    pub fn get_func<'a, S: State>(&self, ctx: &'a VimScriptCtx<S>) -> Option<&'a Function<S>> {
+    pub fn get_func<'a, S: State + 'static>(
+        &self,
+        ctx: &'a VimScriptCtx<S>,
+    ) -> Option<&'a Function<S>> {
         match self {
             Value::Function(f) => ctx.get_func(f),
             _ => None,
@@ -220,7 +258,7 @@ impl Value {
         }
     }
 
-    pub fn not<S: State>(self, ctx: &VimScriptCtx<S>) -> Self {
+    pub fn not<S: State + 'static>(self, ctx: &VimScriptCtx<S>) -> Self {
         Self::Bool(!self.to_bool(ctx))
     }
 
@@ -359,7 +397,11 @@ impl<'a> Names<'a> {
         }
     }
 
-    pub fn iter(&self, v: Value, mut f: impl FnMut(&'a str, Value) -> Result<(), VimError>) -> Result<(), VimError> {
+    pub fn iter(
+        &self,
+        v: Value,
+        mut f: impl FnMut(&'a str, Value) -> Result<(), VimError>,
+    ) -> Result<(), VimError> {
         match self {
             Self::Single(name) => f(name, v),
             _ => todo!("Iterate over lists & objects"),

@@ -67,7 +67,7 @@ impl Area {
         }
     }
 
-    pub fn lines<'s>(&'s self) -> LineIter<'s> {
+    pub fn lines(&self) -> LineIter<'_> {
         LineIter {
             area: self,
             line: self.y,

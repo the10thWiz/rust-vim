@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{VimScriptCtx, BuiltinFunction, value::{Value, Function}, VimError, State};
+use crate::{VimScriptCtx, BuiltinFunction, value::{Value, Function}, VimError, State, Command, CmdRange};
 
 struct Eval;
 
@@ -487,14 +487,14 @@ impl<S: State> VimScriptCtx<S> {
         self.functions.insert_builtin("assert_equal", nargs!(assert |_c, a, b| a == b));
 // 	assert_equal()		assert that two expressions values are equal
 // 	assert_equalfile()	assert that two file contents are equal
-        self.functions.insert_builtin("assert_equal", nargs!(assert |_c, a, b| a != b));
+        self.functions.insert_builtin("assert_notequal", nargs!(assert |_c, a, b| a != b));
 // 	assert_notequal()	assert that two expressions values are not equal
 // 	assert_inrange()	assert that an expression is inside a range
 // 	assert_match()		assert that a pattern matches the value
 // 	assert_notmatch()	assert that a pattern does not match the value
-        self.functions.insert_builtin("assert_equal", nargs!(assert |ctx, a| !a.to_bool(ctx)));
+        self.functions.insert_builtin("assert_false", nargs!(assert |ctx, a| !a.to_bool(ctx)));
 // 	assert_false()		assert that an expression is false
-        self.functions.insert_builtin("assert_equal", nargs!(assert |ctx, a| a.to_bool(ctx)));
+        self.functions.insert_builtin("assert_true", nargs!(assert |ctx, a| a.to_bool(ctx)));
 // 	assert_true()		assert that an expression is true
 // 	assert_exception()	assert that a command throws an exception
 // 	assert_beeps()		assert that a command beeps
@@ -562,5 +562,43 @@ impl<S: State> VimScriptCtx<S> {
 // 	pyxeval()		evaluate |python_x| expression
 // 	debugbreak()		interrupt a program being debugged
 
+    }
+}
+
+struct Cmd<F>(F);
+
+impl<S, F: Fn(CmdRange<'_>, bool, &str, &mut VimScriptCtx<S>, &mut S)> Command<S> for Cmd<F> {
+    fn execute(
+        &self,
+        range: CmdRange<'_>,
+        bang: bool,
+        commands: &str,
+        ctx: &mut VimScriptCtx<S>,
+        state: &mut S,
+    ) {
+        self.0(range, bang, commands, ctx, state);
+    }
+}
+
+macro_rules! cmd {
+    (|$range:ident, $bang:ident, $args:ident, $ctx:ident, $state:ident| $expr:expr) => {
+        {
+            fn cmd_impl<S: State>($range: CmdRange<'_>, $bang: bool, $args: &str, $ctx: &mut VimScriptCtx<S>, $state: &mut S) {
+                $expr;
+            }
+            Arc::new(Cmd(cmd_impl))
+        }
+    };
+}
+
+impl<S: State + 'static> VimScriptCtx<S> {
+    pub fn builtin_commands(&mut self) {
+        self.commands.insert("call".into(), cmd!(|_range, _bang, args, ctx, state| if let Err(e) = ctx.eval(args, state) {
+            state.echo(format_args!("Error: {e:?}"));
+        }));
+        self.commands.insert("echo".into(), cmd!(|_range, _bang, args, ctx, state| match ctx.eval(args, state) {
+            Ok(v) => state.echo(format_args!("{v}")),
+            Err(e) => state.echo(format_args!("Error: {e:?}")),
+        }));
     }
 }

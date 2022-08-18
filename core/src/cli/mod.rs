@@ -4,9 +4,9 @@
 // Distributed under terms of the MIT license.
 //
 
-mod commands;
+pub(crate) mod commands;
 
-use std::{fmt::Debug, sync::Arc};
+use std::fmt::Debug;
 
 use crossterm::{
     cursor::CursorShape,
@@ -16,7 +16,7 @@ use crossterm::{
 };
 use enum_map::Enum;
 
-use crate::{cursor::Cursor, keymap::Action, util::Area, EventReader, Renderable, Vim};
+use crate::{cursor::Cursor, keymap::Action, util::Area, EventReader, Renderable};
 
 #[derive(Debug, Enum, PartialEq, Eq, Clone, Copy)]
 pub enum Cli {
@@ -33,22 +33,9 @@ impl Cli {
     }
 }
 
-pub trait CliCommand {
-    fn execute(&self, args: &str, state: &mut crate::Vim);
-}
-
-impl<F> CliCommand for F
-where
-    F: Fn(&str, &mut crate::Vim) + 'static,
-{
-    fn execute(&self, args: &str, state: &mut crate::Vim) {
-        self(args, state)
-    }
-}
-
 pub enum CliAction {
     Esc,
-    Execute(String, Arc<dyn CliCommand>),
+    Execute(String),
     None,
 }
 
@@ -57,9 +44,9 @@ impl Action for CliAction {
         match self {
             Self::None => (),
             Self::Esc => state.end_cli(),
-            Self::Execute(args, cmd) => {
+            Self::Execute(line) => {
                 state.end_cli();
-                cmd.execute(args.as_str(), state);
+                state.execute(line);
             },
         }
     }
@@ -69,28 +56,15 @@ pub struct CliState {
     cur: Cli,
     cmd: (String, String),
     area: Area,
-    commands: Vec<(String, Arc<dyn CliCommand>)>,
 }
 
 impl CliState {
     pub fn new() -> Self {
-        let mut s = Self {
+        Self {
             cur: Cli::Message,
             cmd: Default::default(),
             area: Area::default(),
-            commands: vec![],
-        };
-        commands::default(&mut s);
-        s
-    }
-
-    pub fn add(mut self, name: impl Into<String>, cmd: impl CliCommand + 'static) -> Self {
-        self.register_command(name, Arc::new(cmd));
-        self
-    }
-
-    pub fn register_command(&mut self, name: impl Into<String>, cmd: Arc<dyn CliCommand>) {
-        self.commands.push((name.into(), cmd));
+        }
     }
 
     pub fn start(&mut self, ty: Cli) {
@@ -132,18 +106,7 @@ impl EventReader for CliState {
                 crossterm::event::KeyCode::Enter => {
                     self.cmd.0.push_str(self.cmd.1.as_str());
                     self.cmd.1.clear();
-                    let arg = std::mem::take(&mut self.cmd.0);
-                    let (name, _) = arg
-                        .split_once(|c: char| c.is_whitespace())
-                        .unwrap_or((arg.as_str(), ""));
-                    for (n, c) in self.commands.iter() {
-                        if n == name {
-                            return CliAction::Execute(arg, Arc::clone(c));
-                        }
-                    }
-                    self.cmd.0 = format!("`{name}` is not a valid command");
-                    self.cur = Cli::Message;
-                    return CliAction::Esc;
+                    return CliAction::Execute(std::mem::take(&mut self.cmd.0));
                 }
                 crossterm::event::KeyCode::Left => {
                     if let Some(ch) = self.cmd.0.pop() {
@@ -151,7 +114,7 @@ impl EventReader for CliState {
                     }
                 }
                 crossterm::event::KeyCode::Right => {
-                    if self.cmd.1.len() > 0 {
+                    if !self.cmd.1.is_empty() {
                         self.cmd.0.push(self.cmd.1.remove(0));
                     }
                 }
@@ -170,7 +133,7 @@ impl EventReader for CliState {
                 crossterm::event::KeyCode::Tab => todo!("Completion"),
                 crossterm::event::KeyCode::BackTab => todo!("Completion"),
                 crossterm::event::KeyCode::Delete => {
-                    if self.cmd.1.len() > 0 {
+                    if !self.cmd.1.is_empty() {
                         self.cmd.1.remove(0);
                     }
                 }

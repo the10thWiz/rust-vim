@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, LinkedList};
 
-use crate::{value::Value, VimError, VimScriptCtx, State};
+use crate::{value::Value, State, VimError, VimScriptCtx};
 
 #[derive(Debug)]
 pub enum ValueError {
@@ -66,13 +66,13 @@ impl<'a> ExprPeice<'a> {
     }
 
     /// Checks if this is an operation. Note that although grouping symbols are counted as
-    /// operations, I don't consider them
+    /// operations, this doesn't consider them as operations
     pub fn is_operation(&self) -> bool {
         matches!(self, Self::Op(op) if matches!(op.chars().next(), Some('+' | '.' | '*' | '-' | '/' | '%' | '=' | '!' | '<' | '>')))
     }
 }
 
-pub fn parse<S: State>(
+pub fn parse<S: State + 'static>(
     mut expr: &str,
     ctx: &mut VimScriptCtx<S>,
     state: &mut S,
@@ -204,7 +204,10 @@ fn list_index<S>(tokens: &mut Vec<ExprPeice>, ctx: &mut VimScriptCtx<S>) -> bool
     let mut changed = false;
     let mut i = 0;
     while i < tokens.len().saturating_sub(3) {
-        if tokens[i + 1] == ExprPeice::Op("[") && tokens[i + 3] == ExprPeice::Op("]") && matches!(&tokens[i], ExprPeice::Value(_)) {
+        if tokens[i + 1] == ExprPeice::Op("[")
+            && tokens[i + 3] == ExprPeice::Op("]")
+            && matches!(&tokens[i], ExprPeice::Value(_))
+        {
             if let ExprPeice::Value(v) = &tokens[i + 2] {
                 let index = v.clone();
                 changed = true;
@@ -238,7 +241,7 @@ fn function_call_extract(tokens: &mut Vec<ExprPeice>) -> bool {
     changed
 }
 
-fn function_calls<S: State>(
+fn function_calls<S: State + 'static>(
     tokens: &mut Vec<ExprPeice>,
     ctx: &mut VimScriptCtx<S>,
     state: &mut S,
@@ -253,17 +256,19 @@ fn function_calls<S: State>(
                 if let ExprPeice::Value(_) = &tokens[t] {
                     if let ExprPeice::Op(",") = &tokens[t + 1] {
                         t += 2;
-                    } else if let ExprPeice::Op(")") = &tokens[t + 1] {
-                        end = t + 1;
-                        break;
+                    } else {
+                        t += 1;
                     }
+                } else if let ExprPeice::Op(")") = &tokens[t] {
+                    end = t + 1;
+                    break;
                 } else {
                     break;
                 }
             }
             if end > i {
                 let mut args = vec![];
-                for _ in i..end {
+                for _ in i + 1..end {
                     if let ExprPeice::Value(v) = tokens.remove(i + 1) {
                         args.push(v)
                     }
@@ -343,45 +348,16 @@ fn unary_expr(
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::{HashMap, LinkedList},
-        sync::Arc,
-    };
+    use std::collections::{HashMap, LinkedList};
 
     use super::*;
-    use crate::{
-        tests::{test_ctx, TestContext},
-        BuiltinFunction,
-    };
-
-    struct NargFn<const N: usize, S>(Box<dyn Fn([Value; N], &mut VimScriptCtx<S>) -> Value>);
-
-    impl<const N: usize, S> BuiltinFunction<S> for NargFn<N, S> {
-        fn execute(&self, args: Vec<Value>, ctx: &mut VimScriptCtx<S>, _s: &mut S) -> Result<Value, VimError> {
-            Ok(self.0(args.try_into().expect("Incorrect number of arguments"), ctx))
-        }
-    }
-
-    pub fn nargs<const N: usize, S: 'static>(
-        f: impl Fn([Value; N], &mut VimScriptCtx<S>) -> Value + 'static,
-    ) -> Arc<dyn BuiltinFunction<S>> {
-        Arc::new(NargFn(Box::new(f)))
-    }
-
-    macro_rules! nargs {
-        (|$ctx:ident, $($param:ident),*| $expr:expr) => {
-            $crate::expr::tests::nargs(|v, $ctx| {
-                let [$($param,)*] = v;
-                $expr
-            })
-        };
-    }
+    use crate::tests::{test_ctx, TestContext};
 
     #[track_caller]
     pub fn test_parse(s: &str) -> Value {
         parse(
             s,
-            test_ctx().builtin("abs", nargs!(|ctx, v| v.abs(ctx))),
+            &mut test_ctx(), //.builtin("abs", nargs!(|ctx, v| v.abs(ctx))),
             &mut TestContext,
         )
         .expect("Expression failed to be parsed")
@@ -438,9 +414,16 @@ mod tests {
     #[test]
     fn list_indexing() {
         let mut ctx = test_ctx();
-        ctx.insert_var("g:a", Value::list([Value::Integer(1)])).unwrap();
-        assert_eq!(Value::Integer(1), parse("g:a[0]", &mut ctx, &mut TestContext).unwrap());
-        assert_eq!(Value::Integer(2), parse("g:a[0] + 1", &mut ctx, &mut TestContext).unwrap());
+        ctx.insert_var("g:a", Value::list([Value::Integer(1)]))
+            .unwrap();
+        assert_eq!(
+            Value::Integer(1),
+            parse("g:a[0]", &mut ctx, &mut TestContext).unwrap()
+        );
+        assert_eq!(
+            Value::Integer(2),
+            parse("g:a[0] + 1", &mut ctx, &mut TestContext).unwrap()
+        );
     }
     //Function(String),
 
@@ -490,6 +473,6 @@ mod tests {
 
     #[test]
     fn function_call() {
-        assert_eq!(Value::Integer(1), test_parse("abs(-1)"));
+        assert_eq!(Value::Number(1.), test_parse("abs(-1)"));
     }
 }

@@ -4,18 +4,18 @@
 // Distributed under terms of the MIT license.
 //
 
-use crate::buffer::BufferWrite;
 use std::io::Write;
 use std::ops::Deref;
 use std::sync::Arc;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind, MouseButton};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use crossterm::Result;
 use log::info;
+use vimscript::Id;
 
-use crate::buffer::{BufferRef, BufferSelect};
+use crate::buffer::{BufferRef, BufferSelect, Signs};
 use crate::cursor::CursorShape;
-use crate::keymap::{Action, State};
+use crate::keymap::{Action, KeyState};
 use crate::util::Pos;
 use crate::Vim;
 use crate::{cursor::Motion, Area, Cursor, EventReader, Renderable};
@@ -59,9 +59,9 @@ impl Default for WindowProps {
     }
 }
 
-pub(crate) mod Op {
-    use std::sync::Arc;
+pub(crate) mod op {
     use crossterm::event::KeyEvent;
+    use std::sync::Arc;
 
     use super::{Operation, Window};
 
@@ -142,10 +142,7 @@ impl WinMode {
     }
 
     pub fn insert(&self) -> bool {
-        match self {
-            Self::Insert | Self::Replace => true,
-            _ => false,
-        }
+        matches!(self, Self::Insert | Self::Replace)
     }
 }
 
@@ -171,6 +168,7 @@ pub struct VisibileArea {
 
 pub struct Window {
     buffer: BufferRef,
+    id: Id,
     buffer_view: VisibileArea,
     window_props: WindowProps,
     window_updates: WindowProps,
@@ -179,9 +177,10 @@ pub struct Window {
 }
 
 impl Window {
-    pub fn new(buffer: BufferRef) -> Self {
+    pub fn new(id: Id, buffer: BufferRef) -> Self {
         Self {
             buffer,
+            id,
             buffer_view: VisibileArea {
                 screen_pos: Area::default(),
                 buffer_row: 0,
@@ -192,6 +191,10 @@ impl Window {
             cursor: Cursor::new(),
             mode: WinMode::Normal,
         }
+    }
+
+    pub fn id(&self) -> Id {
+        self.id
     }
 
     pub fn buffer_select(&self, criteria: &impl BufferSelect) -> bool {
@@ -207,9 +210,12 @@ impl Window {
     }
 
     pub fn cursor_apply(&mut self, motion: Motion) -> &mut Self {
-        let old_cursor = self.cursor;
-        self.cursor
-            .apply(motion, &self.buffer.read(), matches!(self.mode, WinMode::Insert));
+        // let old_cursor = self.cursor;
+        self.cursor.apply(
+            motion,
+            &self.buffer.read(),
+            matches!(self.mode, WinMode::Insert),
+        );
         if self.cursor.row() < self.buffer_view.buffer_row {
             self.buffer_view.buffer_row = self.cursor.row();
             self.on_scroll();
@@ -344,7 +350,9 @@ impl Window {
     fn gutter_area(&self) -> Area {
         self.gutter_offset().area(
             self.gutter_width(),
-            self.area().h.saturating_sub(self.border_width() * 2 + self.status_height()),
+            self.area()
+                .h
+                .saturating_sub(self.border_width() * 2 + self.status_height()),
         )
     }
 
@@ -366,7 +374,9 @@ impl Window {
     fn linenum_area(&self) -> Area {
         self.linenum_offset().area(
             self.linenum_width(),
-            self.area().h.saturating_sub(self.border_width() * 2 + self.status_height()),
+            self.area()
+                .h
+                .saturating_sub(self.border_width() * 2 + self.status_height()),
         )
     }
 
@@ -395,17 +405,21 @@ impl Window {
     #[inline(always)]
     pub fn buffer_area(&self) -> Area {
         self.buffer_offset().area(
-            self.area().w.saturating_sub(self.border_width() * 2 + self.gutter_width() + self.linenum_width()),
-            self.area().h.saturating_sub(self.border_width() * 2 + self.status_height()),
+            self.area().w.saturating_sub(
+                self.border_width() * 2 + self.gutter_width() + self.linenum_width(),
+            ),
+            self.area()
+                .h
+                .saturating_sub(self.border_width() * 2 + self.status_height()),
         )
     }
 
-    pub fn get_state(&self) -> State {
+    pub fn get_state(&self) -> KeyState {
         match self.mode {
-            WinMode::Normal => State::Normal,
-            WinMode::Operation(_) => State::Operator,
-            WinMode::Insert | WinMode::Replace => State::Insert,
-            WinMode::Visual | WinMode::VisualLine | WinMode::VisualBlock => State::Visual,
+            WinMode::Normal => KeyState::Normal,
+            WinMode::Operation(_) => KeyState::Operator,
+            WinMode::Insert | WinMode::Replace => KeyState::Insert,
+            WinMode::Visual | WinMode::VisualLine | WinMode::VisualBlock => KeyState::Visual,
         }
     }
 
@@ -442,11 +456,15 @@ impl Renderable for Window {
             let area = self.gutter_area();
             for (i, line) in area.lines().enumerate() {
                 line.move_cursor(term)?;
-                if i + self.buffer_view.buffer_row < buf_read.len() {
-                    write!(term, "{:width$}", "", width = area.w as usize)?;
-                } else {
-                    write!(term, "{:width$}", "", width = area.w as usize)?;
-                }
+                write!(
+                    term,
+                    "{:width$}",
+                    self.buffer()
+                        .read()
+                        .get_line(i + self.buffer_view.buffer_row)
+                        .map_or(&Signs::default(), |l| l.signs()),
+                    width = area.w as usize
+                )?;
             }
         }
         if self.window_updates.linenum() && self.window_props.linenum() {
@@ -580,8 +598,6 @@ impl EventReader for Window {
             KeyCode::Insert => {
                 if matches!(self.mode, WinMode::Insert) {
                     self.set_mode(WinMode::Replace);
-                } else if matches!(self.mode, WinMode::Replace) {
-                    self.set_mode(WinMode::Insert);
                 } else {
                     self.set_mode(WinMode::Insert);
                 }
@@ -593,7 +609,12 @@ impl EventReader for Window {
 
     fn on_mouse(&mut self, mouse: MouseEvent) -> Self::Act {
         info!("Mouse event: {mouse:?}");
-        let MouseEvent { kind, column, row, modifiers } = mouse;
+        let MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers,
+        } = mouse;
         // TODO: convert col, row into cursor pos
         match kind {
             MouseEventKind::Down(MouseButton::Left) => {

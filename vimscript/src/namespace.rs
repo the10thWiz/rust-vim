@@ -13,6 +13,17 @@ pub enum NamespaceError {
     UnknownNamespace,
 }
 
+#[derive(Debug, Hash, PartialEq, Eq, Default)]
+pub struct IdProcuder(usize);
+
+impl IdProcuder {
+    pub fn get(&mut self) -> Id {
+        let cur = self.0;
+        self.0 += 1;
+        Id(cur)
+    }
+}
+
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub struct Id(usize);
 
@@ -40,6 +51,8 @@ impl Namespace {
             Ok(Self::Builtin)
         } else if s.contains(':') {
             Err(NamespaceError::UnknownNamespace)
+        } else if s.starts_with(|c: char| c.is_uppercase()) {
+            Ok(Self::Global)
         } else {
             Ok(Self::Local)
         }

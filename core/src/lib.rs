@@ -24,7 +24,7 @@ use crossterm::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
         MouseEvent,
     },
-    style::{Color, ContentStyle, Stylize, SetBackgroundColor},
+    style::{Color, ContentStyle, SetBackgroundColor, Stylize},
     terminal::{
         self, disable_raw_mode, enable_raw_mode, DisableLineWrap, EnableLineWrap,
         EnterAlternateScreen, LeaveAlternateScreen,
@@ -32,9 +32,10 @@ use crossterm::{
     QueueableCommand,
 };
 use cursor::Cursor;
-use keymap::{Action, MapAction, MapSet, State};
+use keymap::{Action, KeyState, MapAction, MapSet};
 use log::{error, info};
 use util::{Area, Pos};
+use vimscript::{Id, IdProcuder, State, VimScriptCtx};
 use window::{Scroll, WinMode, Window};
 
 pub use crossterm::Result;
@@ -71,23 +72,25 @@ pub enum WindowSet {
     TabSet(Vec<WindowSet>, usize, Area),
 }
 
-impl From<&Vec<BufferRef>> for WindowSet {
-    fn from(v: &Vec<BufferRef>) -> Self {
-        if v.len() == 1 {
-            Self::Window(Window::new(v[0].clone()))
+// impl From<&Vec<BufferRef>> for WindowSet {
+// }
+
+impl WindowSet {
+    fn new(ids: &mut IdProcuder, buffers: &[BufferRef]) -> Self {
+        if buffers.len() == 1 {
+            Self::Window(Window::new(ids.get(), buffers[0].clone()))
         } else {
             Self::TabSet(
-                v.iter()
-                    .map(|b| Self::Window(Window::new(b.clone())))
+                buffers
+                    .iter()
+                    .map(|b| Self::Window(Window::new(ids.get(), b.clone())))
                     .collect(),
                 0,
                 Area::default(),
             )
         }
     }
-}
 
-impl WindowSet {
     fn get_focus(&self) -> &Window {
         match self {
             Self::Window(w) => w,
@@ -240,25 +243,77 @@ impl WindowSet {
         }
     }
 
-    //fn split_vertical(&mut self, new: Window) {
-    //match self {
-    //Self::Window(w) => {
-    //let area = w.area();
-    //let mut n = Self::Vertical(vec![Self::Window(new)], 1, area);
-    //std::mem::swap(self, &mut n);
-    //if let Self::Vertical(set, ..) = self {
-    //set.insert(0, n);
-    //} else {
-    //unreachable!("self was just set to vertical");
-    //}
-    //self.set_area(area);
-    //},
-    //Self::TabSet(set, focused, _) | Self::Horizontal(set, focused, _) => {
-    //set[*focused].split_vertical(new);
-    //},
-    //_ => todo!(),
-    //}
-    //}
+    fn split_vertical(&mut self, new: Window) {
+        match self {
+            Self::Window(w) => {
+                let area = w.area();
+                let mut n = Self::Vertical(vec![Self::Window(new)], 1, area);
+                std::mem::swap(self, &mut n);
+                if let Self::Vertical(set, ..) = self {
+                    set.insert(0, n);
+                } else {
+                    unreachable!("self was just set to vertical");
+                }
+                self.set_area(area);
+            }
+            Self::TabSet(set, focused, _) | Self::Horizontal(set, focused, _) => {
+                set[*focused].split_vertical(new);
+            }
+            Self::Vertical(v, _, area) => {
+                v.push(Self::Window(new));
+                let area = *area;
+                self.set_area(area);
+            }
+        }
+    }
+
+    fn split_horizontal(&mut self, new: Window) {
+        match self {
+            Self::Window(w) => {
+                let area = w.area();
+                let mut n = Self::Horizontal(vec![Self::Window(new)], 1, area);
+                std::mem::swap(self, &mut n);
+                if let Self::Horizontal(set, ..) = self {
+                    set.insert(0, n);
+                } else {
+                    unreachable!("self was just set to vertical");
+                }
+                self.set_area(area);
+            }
+            Self::TabSet(set, focused, _) | Self::Vertical(set, focused, _) => {
+                set[*focused].split_horizontal(new);
+            }
+            Self::Horizontal(v, _, area) => {
+                v.push(Self::Window(new));
+                let area = *area;
+                self.set_area(area);
+            }
+        }
+    }
+
+    /// Removes window with matching Id. returns whether the set as a whole needs to be removed.
+    fn remove_window(&mut self, id: Id) -> bool {
+        match self {
+            Self::Window(w) => w.id() == id,
+            Self::Vertical(set, focused, area)
+            | Self::Horizontal(set, focused, area)
+            | Self::TabSet(set, focused, area) => {
+                let area = *area;
+                if let Some(idx) = set.iter().position(|w| w.remove_window(id)) {
+                    if *focused > idx {
+                        *focused -= 1;
+                    }
+                    set.remove(idx);
+                }
+                if set.len() == 1 {
+                    let w = set.remove(0);
+                    std::mem::swap(self, &mut w);
+                }
+                self.set_area(area);
+                false
+            }
+        }
+    }
 }
 
 impl Renderable for WindowSet {
@@ -267,11 +322,45 @@ impl Renderable for WindowSet {
             Self::Window(w) => w.set_area(new_area),
             Self::Horizontal(set, _, area) => {
                 *area = new_area;
-                todo!("Horizontal layout");
+                let total: usize = set.iter().map(|w| w.area().width()).sum();
+                let mut cur = 0;
+                for win in set.iter_mut() {
+                    let percent = win.area().width() as f64 / total as f64;
+                    let new_width = percent * new_area.width() as f64;
+                    win.set_area(Area {
+                        x: cur,
+                        y: new_area.y,
+                        w: new_width as usize,
+                        h: new_area.height(),
+                    });
+                    cur += new_width as usize;
+                }
+                if let Some(set) = set.last_mut() {
+                    let mut area = set.area();
+                    area.w += new_area.width() - cur;
+                    set.set_area(area);
+                }
             }
             Self::Vertical(set, _, area) => {
                 *area = new_area;
-                todo!("Vertical layout");
+                let total: usize = set.iter().map(|w| w.area().height()).sum();
+                let mut cur = 0;
+                for win in set.iter_mut() {
+                    let percent = win.area().height() as f64 / total as f64;
+                    let new_height = percent * new_area.height() as f64;
+                    win.set_area(Area {
+                        x: cur,
+                        y: new_area.y,
+                        w: new_area.width(),
+                        h: new_height as usize,
+                    });
+                    cur += new_height as usize;
+                }
+                if let Some(set) = set.last_mut() {
+                    let mut area = set.area();
+                    area.h += new_area.height() - cur;
+                    set.set_area(area);
+                }
             }
             Self::TabSet(set, focused, area) => {
                 *area = new_area;
@@ -300,7 +389,7 @@ impl Renderable for WindowSet {
         match self {
             Self::Window(w) => w.draw(term),
             Self::Vertical(set, _, _) | Self::Horizontal(set, _, _) => {
-                set.iter_mut().map(|w| w.draw(term)).collect()
+                set.iter_mut().try_for_each(|w| w.draw(term))
             }
             Self::TabSet(set, focused, area) => {
                 term.queue(SetBackgroundColor(Color::DarkGrey))?;
@@ -330,6 +419,80 @@ pub enum TerminalState {
 }
 
 pub struct Vim {
+    inner: VimInner,
+    ctx: VimScriptCtx<VimInner>,
+}
+
+impl std::ops::Deref for Vim {
+    type Target = VimInner;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl std::ops::DerefMut for Vim {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+impl Vim {
+    pub fn new() -> Self {
+        let mut ctx = VimScriptCtx::init();
+        cli::commands::default(&mut ctx);
+        Self {
+            inner: VimInner::new(),
+            ctx,
+        }
+    }
+
+    pub fn execute(&mut self, script: &str) {
+        match self.ctx.run(script, &mut self.inner) {
+            Ok(()) => (),
+            Err(e) => self.inner.message(format!("{e:?}")),
+        }
+    }
+
+    fn on_event(&mut self, event: Event) {
+        match event {
+            Event::Resize(c, r) => self.inner.update_area((c, r)),
+            Event::Key(k) => {
+                if k.code == KeyCode::Char('c') && k.modifiers == KeyModifiers::CONTROL {
+                    self.inner.state = TerminalState::Exit;
+                } else {
+                    let state = self.inner.get_state();
+                    match self.state {
+                        TerminalState::Window => match self.inner.map_set.on_key(k, state) {
+                            MapAction::Act(rep, a) => {
+                                for _ in 0..rep {
+                                    a.run(self);
+                                }
+                            }
+                            MapAction::Wait => info!("{:?}", self.inner.map_set),
+                            MapAction::None => self.inner.get_focus_mut().on_key(k).run(self),
+                        },
+                        TerminalState::Cli => self.inner.cli.on_key(k).run(self),
+                        TerminalState::Exit => (),
+                    }
+                }
+            }
+            Event::Mouse(m) => match self.state {
+                TerminalState::Window => self.inner.get_focus_mut().on_mouse(m).run(self),
+                TerminalState::Cli => self.inner.cli.on_mouse(m).run(self),
+                TerminalState::Exit => (),
+            },
+        }
+    }
+}
+
+impl Default for Vim {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub struct VimInner {
     args: Args,
     buffers: Vec<BufferRef>,
     windows: WindowSet,
@@ -340,22 +503,47 @@ pub struct Vim {
     cursor: Cursor,
     map_set: MapSet,
     cli: CliState,
+    silent: bool,
+    buffer_id: IdProcuder,
+    window_id: IdProcuder,
+    script_id: IdProcuder,
 }
 
-impl Vim {
+impl State for VimInner {
+    fn set_silent(&mut self, silent: bool) {
+        self.silent = silent;
+    }
+
+    fn echo(&mut self, msg: std::fmt::Arguments) {
+        if !self.silent {
+            self.message(format!("{}", msg));
+        }
+    }
+}
+
+impl Default for VimInner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl VimInner {
     pub fn new() -> Self {
+        let mut buffer_id = IdProcuder::default();
+        let mut window_id = IdProcuder::default();
+        let mut script_id = IdProcuder::default();
         let args = Args::parse();
         let mut buffers: Vec<_> = args
             .files
             .iter()
-            .map(|p| BufferRef::from_file(p.clone()).unwrap())
+            .map(|p| BufferRef::from_file(&mut buffer_id, p.clone()).unwrap())
             .collect();
         if buffers.is_empty() {
-            buffers.push(BufferRef::empty());
+            buffers.push(BufferRef::empty(&mut buffer_id));
         }
         Self {
             args,
-            windows: WindowSet::from(&buffers),
+            windows: WindowSet::new(&mut window_id, &buffers),
             buffers,
             floating: vec![],
             size: (0, 0),
@@ -364,6 +552,10 @@ impl Vim {
             focus: 0,
             map_set: MapSet::global(),
             cli: CliState::new(),
+            silent: false,
+            buffer_id,
+            window_id,
+            script_id,
         }
     }
 
@@ -431,40 +623,10 @@ impl Vim {
         }
     }
 
-    fn on_event(&mut self, event: Event) {
-        match event {
-            Event::Resize(c, r) => self.update_area((c, r)),
-            Event::Key(k) => {
-                if k.code == KeyCode::Char('c') && k.modifiers == KeyModifiers::CONTROL {
-                    self.state = TerminalState::Exit;
-                } else {
-                    match self.state {
-                        TerminalState::Window => match self.map_set.on_key(k, self.get_state()) {
-                            MapAction::Act(rep, a) => {
-                                for _ in 0..rep {
-                                    a.run(self);
-                                }
-                            },
-                            MapAction::Wait => info!("{:?}", self.map_set),
-                            MapAction::None => self.get_focus_mut().on_key(k).run(self),
-                        },
-                        TerminalState::Cli => self.cli.on_key(k).run(self),
-                        TerminalState::Exit => (),
-                    }
-                }
-            }
-            Event::Mouse(m) => match self.state {
-                TerminalState::Window => self.get_focus_mut().on_mouse(m).run(self),
-                TerminalState::Cli => self.cli.on_mouse(m).run(self),
-                TerminalState::Exit => (),
-            },
-        }
-    }
-
-    pub fn get_state(&self) -> State {
+    pub fn get_state(&self) -> KeyState {
         match self.state {
-            TerminalState::Cli => State::Cli,
-            TerminalState::Exit => State::Normal,
+            TerminalState::Cli => KeyState::Cli,
+            TerminalState::Exit => KeyState::Normal,
             TerminalState::Window => self.get_focus().get_state(),
         }
     }
@@ -475,7 +637,11 @@ impl Vim {
         match self.state {
             TerminalState::Window => {
                 self.cursor = self.get_focus().cursor_pos();
-                Pos(self.size.0.saturating_sub(20) as usize, self.size.1.saturating_sub(1) as usize).move_cursor(&mut lock)?;
+                Pos(
+                    self.size.0.saturating_sub(20) as usize,
+                    self.size.1.saturating_sub(1) as usize,
+                )
+                .move_cursor(&mut lock)?;
                 self.map_set.draw(&mut lock, self.get_state())?;
             }
             TerminalState::Cli => self.cursor = self.cli.cursor_pos(),

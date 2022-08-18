@@ -5,38 +5,53 @@
 //
 
 use std::{
+    fmt::Display,
     fs::File,
-    io::{BufRead, BufReader, Write, self},
+    io::{self, BufRead, BufReader, Write},
     ops::{Deref, DerefMut, Index, IndexMut},
     path::PathBuf,
     sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard},
 };
 
 use crossterm::style::ContentStyle;
+use vimscript::{IdProcuder, Id};
 
-use crate::{util::Area, Result};
+use crate::Result;
 
 pub trait BufferSelect {
     fn select(&self, buffer: &Buffer) -> bool;
 }
 
+#[derive(Debug, Default)]
+pub struct Signs {
+    lst: Vec<(char, ContentStyle, isize)>,
+}
+
+impl Display for Signs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (view, style, _) in self.lst.iter().take(2) {
+            write!(f, "{}", style.apply(view))?;
+        }
+        Ok(())
+    }
+}
+
 pub struct Line {
     text: String,
     style: Vec<(usize, ContentStyle)>,
+    signs: Signs,
 }
 
 impl Line {
     fn empty() -> Self {
-        Self {
-            text: String::new(),
-            style: vec![(0, ContentStyle::default())],
-        }
+        Self::new(String::new())
     }
 
     fn new(text: String) -> Self {
         Self {
             style: vec![(text.len(), ContentStyle::default())],
             text,
+            signs: Signs::default(),
         }
     }
 
@@ -73,6 +88,10 @@ impl Line {
             self.text.ceil_char_boundary(pos.saturating_add(1))
         }
     }
+
+    pub fn signs(&self) -> &Signs {
+        &self.signs
+    }
 }
 
 pub struct Buffer {
@@ -100,7 +119,11 @@ impl Buffer {
     }
 
     pub fn write_file(&mut self) -> Result<()> {
-        let mut file = File::create(self.filename.as_ref().ok_or(io::Error::new(io::ErrorKind::NotFound, "File not found"))?)?;
+        let mut file = File::create(
+            self.filename
+                .as_ref()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "File not found"))?,
+        )?;
         for line in self.data.iter() {
             file.write_all(line.text.as_bytes())?;
             file.write_all(b"\n")?;
@@ -110,7 +133,10 @@ impl Buffer {
 
     pub fn title(&self) -> &str {
         match &self.filename {
-            Some(path) => path.iter().last().map_or("/", |o| o.to_str().unwrap_or("[INVALID PATH]")),
+            Some(path) => path
+                .iter()
+                .last()
+                .map_or("/", |o| o.to_str().unwrap_or("[INVALID PATH]")),
             None => "[Scratch Buffer]",
         }
     }
@@ -178,29 +204,32 @@ impl IndexMut<usize> for Buffer {
 }
 
 pub struct BufferRef {
+    id: Id,
     inner: Arc<RwLock<Buffer>>,
 }
 
 impl BufferRef {
-    pub fn empty() -> Self {
+    pub fn empty(id: &mut IdProcuder) -> Self {
         Self {
+            id: id.get(),
             inner: Arc::new(RwLock::new(Buffer::empty())),
         }
     }
 
-    pub fn from_file(path: impl Into<PathBuf>) -> Result<Self> {
+    pub fn from_file(id: &mut IdProcuder, path: impl Into<PathBuf>) -> Result<Self> {
         Buffer::from_file(path).map(|b| Self {
+            id: id.get(),
             inner: Arc::new(RwLock::new(b)),
         })
     }
 
-    pub fn read<'s>(&'s self) -> BufferRead<'s> {
+    pub fn read(&self) -> BufferRead<'_> {
         BufferRead {
             inner: self.inner.read().unwrap(),
         }
     }
 
-    pub fn write<'s>(&'s self) -> BufferWrite<'s> {
+    pub fn write(&self) -> BufferWrite<'_> {
         BufferWrite {
             inner: self.inner.write().unwrap(),
         }

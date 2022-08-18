@@ -4,7 +4,7 @@
 // Distributed under terms of the MIT license.
 //
 
-use crate::{buffer::BufferRead, Area, Result, util::Pos};
+use crate::{buffer::BufferRead, Result, util::Pos};
 use crossterm::{
     cursor::{MoveTo, SetCursorShape},
     QueueableCommand,
@@ -30,6 +30,12 @@ pub struct Cursor {
     x: usize,
     y: usize,
     ty: CursorShape,
+}
+
+impl Default for Cursor {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Cursor {

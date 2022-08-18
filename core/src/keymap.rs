@@ -4,16 +4,20 @@
 // Distributed under terms of the MIT license.
 //
 
-use std::{collections::HashMap, fmt::Debug, sync::Arc, io::Write};
+use std::{collections::HashMap, fmt::Debug, io::Write, sync::Arc};
 
-use crossterm::{event::{KeyCode, KeyEvent, KeyModifiers}, Result};
+use crossterm::{
+    event::{KeyCode, KeyEvent, KeyModifiers},
+    Result,
+};
 use enum_map::{Enum, EnumMap};
 
 use crate::{
     cli::Cli,
     cursor::Motion,
-    window::{Dist, Op, Scroll, WinMode},
-    Vim, util::KeyDisplay,
+    util::KeyDisplay,
+    window::{op, Dist, Scroll, WinMode},
+    Vim,
 };
 
 pub trait Action {
@@ -63,7 +67,9 @@ impl Debug for KeyMapAction {
 impl KeyMapAction {
     fn insert(&mut self, k: KeyEvent, a: KeyMapAction) {
         match self {
-            Self::Chord(map, _) => { map.insert(k, a); },
+            Self::Chord(map, _) => {
+                map.insert(k, a);
+            }
             Self::Action(old) => {
                 let tmp = Arc::clone(old);
                 *self = Self::Chord(HashMap::new(), Some(tmp));
@@ -138,13 +144,10 @@ impl KeyMap {
     fn default_action(&mut self) -> MapAction {
         while !self.state.is_empty() {
             self.state.pop();
-            match self.get_action(self.state.as_ref()) {
-                Some(KeyMapAction::Chord(_, Some(a))) => {
-                    let ret = MapAction::Act(self.rep.max(1), Arc::clone(a));
-                    self.clear();
-                    return ret;
-                }
-                _ => (),
+            if let Some(KeyMapAction::Chord(_, Some(a))) = self.get_action(self.state.as_ref()) {
+                let ret = MapAction::Act(self.rep.max(1), Arc::clone(a));
+                self.clear();
+                return ret;
             }
         }
         self.clear();
@@ -160,7 +163,7 @@ impl KeyMap {
 }
 
 #[derive(Debug, Enum, Clone, Copy, PartialEq, Eq)]
-pub enum State {
+pub enum KeyState {
     Normal,
     Insert,
     Visual,
@@ -168,7 +171,7 @@ pub enum State {
     Cli,
 }
 
-impl Default for State {
+impl Default for KeyState {
     fn default() -> Self {
         Self::Normal
     }
@@ -176,14 +179,14 @@ impl Default for State {
 
 #[derive(Debug, Default)]
 pub struct MapSet {
-    map: EnumMap<State, KeyMap>,
-    last: State,
+    map: EnumMap<KeyState, KeyMap>,
+    last: KeyState,
 }
 
 macro_rules! keys {
     ($map:ident, State::$name:ident => { $($rem:tt)* }) => {
         $map.register_bindings(
-            State::Normal,
+            KeyState::Normal,
             keys!([]; $($rem)*),
         );
     };
@@ -275,13 +278,13 @@ impl MapSet {
                 win.cursor_apply(Motion::SetCol(col));
             },
             'd' => |v| {
-                v.set_mode(WinMode::Operation(Op::delete()));
+                v.set_mode(WinMode::Operation(op::delete()));
             },
             'y' => |v| {
-                v.set_mode(WinMode::Operation(Op::yank()));
+                v.set_mode(WinMode::Operation(op::yank()));
             },
             'r' => |v| {
-                v.set_mode(WinMode::Operation(Op::replace()));
+                v.set_mode(WinMode::Operation(op::replace()));
             },
             'R' => |v| {
                 v.set_mode(WinMode::Replace);
@@ -303,7 +306,7 @@ impl MapSet {
             },
         });
         let arrow_keys = s.clone_bindings(
-            State::Normal,
+            KeyState::Normal,
             [
                 keys!(@keycode Up),
                 keys!(@keycode Down),
@@ -313,10 +316,10 @@ impl MapSet {
                 keys!(@keycode End),
             ],
         );
-        s.register_bindings(State::Insert, arrow_keys.iter().cloned());
-        s.register_bindings(State::Visual, arrow_keys.iter().cloned());
+        s.register_bindings(KeyState::Insert, arrow_keys.iter().cloned());
+        s.register_bindings(KeyState::Visual, arrow_keys.iter().cloned());
         let hjkl_keys = s.clone_bindings(
-            State::Normal,
+            KeyState::Normal,
             [
                 keys!(@keycode 'h'),
                 keys!(@keycode 'j'),
@@ -329,17 +332,17 @@ impl MapSet {
                 keys!(@keycode 'Y' C),
             ],
         );
-        s.register_bindings(State::Visual, hjkl_keys.iter().cloned());
-        let win_keys = s.clone_bindings(State::Normal, [keys!(@keycode 'w' C)]);
-        s.register_bindings(State::Insert, win_keys.iter().cloned());
-        s.register_bindings(State::Visual, win_keys.iter().cloned());
-        s.register_bindings(State::Operator, win_keys.iter().cloned());
+        s.register_bindings(KeyState::Visual, hjkl_keys.iter().cloned());
+        let win_keys = s.clone_bindings(KeyState::Normal, [keys!(@keycode 'w' C)]);
+        s.register_bindings(KeyState::Insert, win_keys.iter().cloned());
+        s.register_bindings(KeyState::Visual, win_keys.iter().cloned());
+        s.register_bindings(KeyState::Operator, win_keys.iter().cloned());
         s
     }
 
     fn register_bindings(
         &mut self,
-        state: State,
+        state: KeyState,
         bindings: impl IntoIterator<Item = (KeyEvent, KeyMapAction)>,
     ) {
         for (k, a) in bindings {
@@ -349,7 +352,7 @@ impl MapSet {
 
     fn clone_bindings(
         &self,
-        state: State,
+        state: KeyState,
         iter: impl IntoIterator<Item = KeyEvent>,
     ) -> Vec<(KeyEvent, KeyMapAction)> {
         let mut ret = vec![];
@@ -361,23 +364,26 @@ impl MapSet {
         ret
     }
 
-    pub fn on_key(&mut self, k: KeyEvent, state: State) -> MapAction {
+    pub fn on_key(&mut self, k: KeyEvent, state: KeyState) -> MapAction {
         if self.last != state {
             self.map[self.last].clear();
         }
-        if state != State::Operator {
+        if state != KeyState::Operator {
             self.last = state;
         }
-        if state == State::Operator {
-            MapAction::Act(self.map[self.last].rep.max(0), Arc::new(move |v: &mut Vim| {
-                v.get_focus_mut().run_operation(k);
-            }))
+        if state == KeyState::Operator {
+            MapAction::Act(
+                self.map[self.last].rep.max(0),
+                Arc::new(move |v: &mut Vim| {
+                    v.get_focus_mut().run_operation(k);
+                }),
+            )
         } else {
             self.map[state].on_key(k)
         }
     }
 
-    pub fn draw<W: Write>(&self, term: &mut W, state: State) -> Result<()> {
+    pub fn draw<W: Write>(&self, term: &mut W, state: KeyState) -> Result<()> {
         self.map[state].draw(term)
     }
 }

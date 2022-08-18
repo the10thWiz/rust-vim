@@ -1,9 +1,12 @@
+#![feature(iter_intersperse)]
+
+pub mod builtin;
 mod expr;
 mod namespace;
 mod value;
-pub mod builtin;
 
 use expr::ValueError;
+pub use namespace::{ Id, IdProcuder };
 use namespace::NamespaceError;
 use value::Names;
 
@@ -17,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-pub trait State {
+pub trait State: 'static {
     fn set_silent(&mut self, silent: bool);
     fn echo(&mut self, msg: Arguments);
 }
@@ -61,7 +64,12 @@ pub trait Command<S> {
 }
 
 pub trait BuiltinFunction<S> {
-    fn execute(&self, args: Vec<Value>, ctx: &mut VimScriptCtx<S>, state: &mut S) -> Result<Value, VimError>;
+    fn execute(
+        &self,
+        args: Vec<Value>,
+        ctx: &mut VimScriptCtx<S>,
+        state: &mut S,
+    ) -> Result<Value, VimError>;
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -162,26 +170,40 @@ pub struct VimScriptCtx<S> {
     silence_level: usize,
 }
 
-impl<S: State> VimScriptCtx<S> {
+impl<S: State + 'static> Default for VimScriptCtx<S> {
+    fn default() -> Self {
+        Self::init()
+    }
+}
+
+enum ReturnType {
+    Continue,
+    Break,
+    Return(Value),
+}
+
+impl<S: State + 'static> VimScriptCtx<S> {
     pub fn init() -> Self {
-        let mut variables = NameSpaced::default();
-        variables.insert_builtin("v:true", Value::Bool(true));
-        variables.insert_builtin("v:false", Value::Bool(false));
-        variables.insert_builtin("v:null", Value::Nil);
-        Self {
+        let mut ret = Self {
             commands: HashMap::new(),
             functions: NameSpaced::default(),
-            variables,
+            variables: NameSpaced::default(),
             timeout: Instant::now() + Duration::from_secs(5),
             silence_level: 0,
-        }
+        };
+        ret.variables.insert_builtin("v:true", Value::Bool(true));
+        ret.variables.insert_builtin("v:false", Value::Bool(false));
+        ret.variables.insert_builtin("v:null", Value::Nil);
+        ret.builtin_functions();
+        ret.builtin_commands();
+        ret
     }
 
     pub fn run(&mut self, script: &str, state: &mut S) -> Result<(), VimError> {
         self.timeout = Instant::now() + Duration::from_secs(5);
-        let mut script = Tokenizer { script };
+        let mut script = Tokenizer::Script(script);
         match self.run_inner(&mut script, Section::Script, RunTy::Now, state) {
-            Ok(()) | Err(VimError::Exit) => Ok(()),
+            Ok(_) | Err(VimError::Exit) => Ok(()),
             Err(e) => Err(e),
         }
     }
@@ -192,15 +214,19 @@ impl<S: State> VimScriptCtx<S> {
         section: Section,
         mut run: RunTy<'_>,
         state: &mut S,
-    ) -> Result<(), VimError> {
+    ) -> Result<Option<Value>, VimError> {
         while let Some(line) = script.next()? {
             if self.timeout < Instant::now() {
                 return Err(VimError::TimeOut);
             }
-            self.run_line(script, line, section, &mut run, state)?;
+            match self.run_line(script, line, section, &mut run, state)? {
+                ReturnType::Break => return Ok(None),
+                ReturnType::Continue => (),
+                ReturnType::Return(v) => return Ok(Some(v)),
+            }
         }
         if section == Section::Script {
-            Ok(())
+            Ok(None)
         } else {
             Err(VimError::UnexpectedEof)
         }
@@ -213,18 +239,18 @@ impl<S: State> VimScriptCtx<S> {
         section: Section,
         run: &mut RunTy<'_>,
         state: &mut S,
-        ) -> Result<(), VimError> {
+    ) -> Result<ReturnType, VimError> {
         match line.command {
             "if" => match run {
                 RunTy::Skip | RunTy::SkipEndIf => {
-                    self.run_inner(script, Section::If, RunTy::SkipEndIf, state)?
+                    self.run_inner(script, Section::If, RunTy::SkipEndIf, state)?;
                 }
                 RunTy::Function(f) => f.inner.push(line.to_owned()),
                 RunTy::Now => {
                     if self.eval(line.params, state)?.to_bool(self) {
-                        self.run_inner(script, Section::If, RunTy::Now, state)?
+                        self.run_inner(script, Section::If, RunTy::Now, state)?;
                     } else {
-                        self.run_inner(script, Section::If, RunTy::Skip, state)?
+                        self.run_inner(script, Section::If, RunTy::Skip, state)?;
                     }
                 }
             },
@@ -266,7 +292,7 @@ impl<S: State> VimScriptCtx<S> {
             }
             "endif" => {
                 if section == Section::If {
-                    return Ok(());
+                    return Ok(ReturnType::Break);
                 } else {
                     return Err(VimError::UnexpectedKeyword("endif"));
                 }
@@ -295,7 +321,7 @@ impl<S: State> VimScriptCtx<S> {
             }
             "endfor" => {
                 if section == Section::For {
-                    return Ok(());
+                    return Ok(ReturnType::Break);
                 } else {
                     return Err(VimError::UnexpectedKeyword("endfor"));
                 }
@@ -308,13 +334,13 @@ impl<S: State> VimScriptCtx<S> {
             }
             "endwhile" => {
                 if section == Section::While {
-                    return Ok(());
+                    return Ok(ReturnType::Break);
                 } else {
                     return Err(VimError::UnexpectedKeyword("endwhile"));
                 }
             }
             "function" => run.act(line, |line| {
-                let mut function = VimFunction::new(vec![line.params.to_owned()]);
+                let (name, mut function) = Self::parse_function(line.params)?;
                 self.run_inner(
                     script,
                     Section::Function,
@@ -322,12 +348,12 @@ impl<S: State> VimScriptCtx<S> {
                     state,
                 )?;
                 self.functions
-                    .insert("TODO", Function::VimScript(function))?;
+                    .insert(name, Function::VimScript(Arc::new(function)))?;
                 Ok(())
             })?,
             "endfunction" => {
                 if section == Section::Function {
-                    return Ok(());
+                    return Ok(ReturnType::Break);
                 } else {
                     return Err(VimError::UnexpectedKeyword("endfunction"));
                 }
@@ -347,18 +373,35 @@ impl<S: State> VimScriptCtx<S> {
                 if let Some(line) = Line::new(full_line.params)? {
                     self.silence_level += 1;
                     state.set_silent(self.silence_level > 0);
-                    self.run_line(script, line, section, &mut RunTy::Now, state)?;
+                    self.run_line(script, line, Section::Script, &mut RunTy::Now, state)?;
                     state.set_silent(self.silence_level > 0);
                     self.silence_level -= 1;
                 }
                 Ok(())
             })?,
-            "execute" => run.act(line, |line|{
+            "unsilent" => run.act(line, |full_line| {
+                if let Some(line) = Line::new(full_line.params)? {
+                    state.set_silent(false);
+                    self.run_line(script, line, Section::Script, &mut RunTy::Now, state)?;
+                    state.set_silent(self.silence_level > 0);
+                }
+                Ok(())
+            })?,
+            "execute" => run.act(line, |line| {
                 let v = self.eval(line.params, state)?.to_string(self);
-                self.run_inner(&mut Tokenizer { script:v.as_str() }, Section::Script, RunTy::Now, state)
+                self.run_inner(
+                    &mut Tokenizer::Script(v.as_str()),
+                    Section::Script,
+                    RunTy::Now,
+                    state,
+                )
+                .map(|_| ())
             })?,
             "finish" => return Err(VimError::Exit),
             "exit" => return Err(VimError::Exit),
+            "return" => {
+                return Ok(ReturnType::Return(self.eval(line.params, state)?));
+            }
             _ => run.act(line, |line| {
                 if let Some(cmd) = self.commands.get(line.command) {
                     Arc::clone(cmd).execute(line.range, line.bang, line.params, self, state);
@@ -368,7 +411,21 @@ impl<S: State> VimScriptCtx<S> {
                 }
             })?,
         }
-        Ok(())
+        Ok(ReturnType::Continue)
+    }
+
+    fn parse_function(s: &str) -> Result<(&str, VimFunction), VimError> {
+        if let Some((name, args)) = s
+            .split_once('(')
+            .and_then(|(name, args)| args.strip_suffix(')').map(|args| (name, args)))
+        {
+            Ok((
+                name,
+                VimFunction::new(args.split(',').map(|a| a.trim().to_string()).collect()),
+            ))
+        } else {
+            Err(VimError::InvalidParams)
+        }
     }
 
     pub fn run_function(
@@ -378,8 +435,14 @@ impl<S: State> VimScriptCtx<S> {
         state: &mut S,
     ) -> Result<Value, VimError> {
         match self.get_func(f) {
-            Some(Function::VimScript(_f)) => todo!("Vimscript Functions"),
-            Some(Function::Builtin(f)) => f.clone().execute(args, self, state),
+            Some(Function::VimScript(f)) => {
+                let f = Arc::clone(f);
+                self.variables.enter_local();
+                let ret = f.execute(args, self, state);
+                self.variables.leave_local();
+                ret
+            }
+            Some(Function::Builtin(f)) => Arc::clone(f).execute(args, self, state),
             None => Err(VimError::FunctionUndefined),
         }
     }
@@ -428,18 +491,36 @@ impl<S: State> VimScriptCtx<S> {
             .insert_builtin(name.into(), Function::Builtin(command));
         self
     }
+
+    pub fn set_window(&mut self, id: impl Into<Option<Id>>) {
+        let id = id.into();
+        self.variables.set_window(id);
+        self.functions.set_window(id);
+    }
+
+    pub fn set_buffer(&mut self, id: impl Into<Option<Id>>) {
+        let id = id.into();
+        self.variables.set_buffer(id);
+        self.functions.set_buffer(id);
+    }
+
+    pub fn set_script(&mut self, id: impl Into<Option<Id>>) {
+        let id = id.into();
+        self.variables.set_script(id);
+        self.functions.set_script(id);
+    }
 }
 
 #[derive(Debug, Clone)]
-struct Tokenizer<'a> {
-    script: &'a str,
+enum Tokenizer<'a> {
+    Script(&'a str),
+    Iter(std::slice::Iter<'a, LineOwned>),
 }
 
 impl<'a> Tokenizer<'a> {
-    fn get_next(&mut self) -> Result<Option<Line<'a>>, VimError> {
+    fn get_next(script: &mut &'a str) -> Result<Option<Line<'a>>, VimError> {
         let mut last = ' ';
-        let (line, next) = self
-            .script
+        let (line, next) = script
             .split_once(|c: char| {
                 let result = (last != '\\' && c == '\n') || c == '|';
                 if !c.is_whitespace() {
@@ -447,18 +528,27 @@ impl<'a> Tokenizer<'a> {
                 }
                 result
             })
-            .unwrap_or((self.script, ""));
-        self.script = next.trim();
+            .unwrap_or((script, ""));
+        *script = next.trim();
         Line::new(line.trim())
     }
 
     pub fn next(&mut self) -> Result<Option<Line<'a>>, VimError> {
-        while !self.script.is_empty() {
-            if let Some(line) = self.get_next()? {
-                return Ok(Some(line));
+        match self {
+            Self::Script(script) => {
+                while !script.is_empty() {
+                    if let Some(line) = Self::get_next(script)? {
+                        return Ok(Some(line));
+                    }
+                }
+                Ok(None)
             }
+            Self::Iter(iter) => Ok(iter.next().map(|l| l.as_ref()))
         }
-        Ok(None)
+    }
+
+    pub fn from_iter(iter: std::slice::Iter<'a, LineOwned>) -> Self {
+        Self::Iter(iter)
     }
 }
 
@@ -582,18 +672,18 @@ mod tests {
     pub struct TestContext;
 
     impl State for TestContext {
-        fn set_silent(&mut self, _s: bool) { }
-        fn echo(&mut self, _msg: Arguments) { }
+        fn set_silent(&mut self, _s: bool) {}
+        fn echo(&mut self, _msg: Arguments) {}
     }
 
     pub fn test_ctx() -> VimScriptCtx<TestContext> {
         VimScriptCtx::init()
     }
 
-    pub struct ExpectCall(
-        Box<dyn Fn(CmdRange<'_>, bool, &str, &mut VimScriptCtx<TestContext>, &mut TestContext)>,
-        AtomicUsize,
-    );
+    type BoxedFn =
+        Box<dyn Fn(CmdRange<'_>, bool, &str, &mut VimScriptCtx<TestContext>, &mut TestContext)>;
+
+    pub struct ExpectCall(BoxedFn, AtomicUsize);
 
     pub fn command(
         f: impl Fn(CmdRange<'_>, bool, &str, &mut VimScriptCtx<TestContext>, &mut TestContext) + 'static,
@@ -627,7 +717,8 @@ mod tests {
         let (guard, cmd) = command(|_r, _b, _a, _c, _s| ());
         test_ctx()
             .command("Test", cmd)
-            .run("Test", &mut TestContext);
+            .run("Test", &mut TestContext)
+            .unwrap();
         assert_eq!(guard.called(), 1, "Was not called once");
     }
 
@@ -637,7 +728,7 @@ mod tests {
         };
         ($cmd:literal, $name:literal, $num:literal => $exp:expr) => { {
             let (guard, cmd) = command($exp);
-            test_ctx().command($name, cmd).run($cmd, &mut TestContext);
+            test_ctx().command($name, cmd).run($cmd, &mut TestContext).unwrap();
             assert_eq!(guard.called(), $num, "Was not called once");
         } };
     }
@@ -697,9 +788,9 @@ mod tests {
     #[test]
     fn let_expr() {
         let mut ctx = test_ctx();
-        ctx.run("let g:a = ''", &mut TestContext);
+        ctx.run("let g:a = ''", &mut TestContext).unwrap();
         assert_eq!(ctx.lookup("g:a").unwrap(), &Value::str(""));
-        ctx.run("let g:b = g:a", &mut TestContext);
+        ctx.run("let g:b = g:a", &mut TestContext).unwrap();
         assert_eq!(ctx.lookup("g:b").unwrap(), &Value::str(""));
     }
 
@@ -727,5 +818,11 @@ mod tests {
         check_command!("for a in [0] | Test | endfor ", "Test", 1 => |_, _, _, ctx, s| {
             assert_eq!(ctx.eval("a", s).unwrap(), Value::Integer(0));
         });
+    }
+
+    #[test]
+    fn function_expr() {
+        check_command!("function g:Build() | Test | endfunction ", "Test", 0 => |_, _, _, _c, _|());
+        check_command!("function g:Build() | Test | endfunction | call g:Build()", "Test", 1 => |_, _, _, _c, _|());
     }
 }
