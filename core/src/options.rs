@@ -312,10 +312,10 @@ options! {
         rightleft | rl : isize => 0isize, // window is right-to-left oriented
         rightleftcmd | rlc : isize => 0isize, // commands for which editing works right-to-left
         rubydll : isize => 0isize, // name of the Ruby dynamic library
-        ruler | ru : isize => 0isize, // show cursor line and column in the status line
+        ruler | ru : bool => false, // show cursor line and column in the status line
         rulerformat | ruf : isize => 0isize, // custom format for the ruler
-        runtimepath | rtp : isize => 0isize, // list of directories used for runtime files
-        scroll | scr : isize => 0isize, // lines to scroll with CTRL-U and CTRL-D
+        runtimepath | rtp : String => "$XDG_CONFIG_HOME/rvim/", // list of directories used for runtime files
+        scroll | scr : isize => 1isize, // lines to scroll with CTRL-U and CTRL-D
         scrollbind | scb : isize => 0isize, // scroll in window as other windows scroll
         scrolljump | sj : isize => 0isize, // minimum number of lines to scroll
         scrolloff | so : isize => 0isize, // minimum nr. of lines above and below cursor

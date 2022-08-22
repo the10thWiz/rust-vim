@@ -11,8 +11,8 @@ mod options;
 
 use crate::buffer::BufferSelect;
 use std::{
-    io::{Stdout, StdoutLock, Write, Read},
-    time::Duration, path::{PathBuf, Path}, fs::File,
+    io::{Stdout, StdoutLock, Write, Read, self, ErrorKind},
+    time::Duration, path::{PathBuf, Path}, fs::File, borrow::Cow,
 };
 
 use args::Args;
@@ -378,6 +378,10 @@ impl Vim {
         }
     }
 
+    fn init(&mut self) {
+        self.inner.init(&mut self.ctx);
+    }
+
     pub fn execute(&mut self, script: &str) {
         match self.ctx.run(script, &mut self.inner) {
             Ok(()) => (),
@@ -509,6 +513,56 @@ impl VimInner {
             window_id,
             script_id,
         }
+    }
+
+    pub fn shell_expand<'v>(&self, mut var: &'v str) -> Cow<'v, str> {
+        if var.contains('$') {
+            let mut ret = String::new();
+            while let Some(idx) = var.find('$') {
+                ret += &var[..idx];
+                var = &var[idx..];
+                let end = var.find(|c: char| !c.is_alphanumeric()).unwrap_or(var.len());
+                if let Ok(val) = std::env::var(&var[..end]) {
+                    ret += &val;
+                }
+                var = &var[..end];
+            }
+            ret += var;
+            Cow::Owned(ret)
+        } else {
+            Cow::Borrowed(var)
+        }
+    }
+
+    pub fn find_on_rtp(&self, name: impl AsRef<str>) -> std::result::Result<File, io::Error> {
+        let name = name.as_ref();
+        for path in self.options.runtimepath.split(',') {
+            // TODO: shell expand path & name
+            if let Ok(mut dir) = std::fs::read_dir(self.shell_expand(path).as_ref()) {
+                if let Some(tmp) = dir.filter_map(|p| p.ok()).find(|p| p.file_name() == name) {
+                    return File::open(tmp.path());
+                }
+            }
+        }
+        Err(io::Error::new(ErrorKind::NotFound, "File was not found on 'runtimepath'"))
+    }
+
+    fn init(&mut self, ctx: &mut VimScriptCtx<Self>) {
+        if let Ok(mut init) = self.find_on_rtp("init.vim") {
+            let mut buf = String::new();
+            if let Ok(_) = init.read_to_string(&mut buf) {
+                ctx.set_script(Some(self.get_next_script_id()));
+                match ctx.run(buf.as_str(), self) {
+                    Ok(()) => (),
+                    Err(e) => self.echo(format_args!("{e:?}")),
+                }
+                ctx.set_script(None);
+            }
+        }
+        // TODO: potentially run additional init files as requested by the main init file. These
+        // can and should be with a seperate script id, and ideally I should allow lazy loading at
+        // some point. For now, this is good enough for me. (sort of - the rtp doesn't work right
+        // yet)
     }
 
     pub fn get_options(&self) -> &Options {
@@ -699,6 +753,7 @@ impl<W: Lockable> Curse<W> {
             lock.queue(EnterAlternateScreen)?;
             lock.queue(EnableMouseCapture)?;
         }
+        self.vim.init();
         self.event_loop()?;
         disable_raw_mode()?;
         {
