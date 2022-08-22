@@ -4,6 +4,7 @@
 // Distributed under terms of the MIT license.
 //
 
+use std::fmt::Display;
 use std::io::Write;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -53,7 +54,7 @@ impl Default for WindowProps {
         let mut s = Self(0);
         s.set_gutter(true);
         s.set_linenum(true);
-        //s.set_status(true);
+        s.set_status(true);
         s.set_buffer(true);
         s
     }
@@ -449,7 +450,7 @@ impl Renderable for Window {
     fn draw<W: Write>(&mut self, term: &mut W) -> Result<()> {
         let buf_read = self.buffer.read();
         if self.window_updates.border() && self.window_props.border() {
-            // Draw border
+            todo!("Draw border")
         }
         if self.window_updates.gutter() && self.window_props.gutter() {
             // Draw Gutter
@@ -482,6 +483,8 @@ impl Renderable for Window {
         }
         if self.window_updates.status() && self.window_props.status() {
             // Draw status line
+            self.status_offset().move_cursor(term)?;
+            write!(term, "{:width$} ", self.status(), width = self.area().w as usize)?;
         }
         if self.window_updates.buffer() && self.window_props.buffer() {
             // Draw buffer
@@ -497,6 +500,24 @@ impl Renderable for Window {
         }
         self.window_updates = WindowProps::none();
         Ok(())
+    }
+}
+
+pub struct StatusBar<'w> {
+    buffer: &'w BufferRef,
+}
+
+impl Display for StatusBar<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, " {} ", self.buffer.read().title())
+    }
+}
+
+impl Window {
+    pub fn status<'s>(&'s self) -> StatusBar<'s> {
+        StatusBar {
+            buffer: &self.buffer,
+        }
     }
 }
 

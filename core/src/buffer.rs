@@ -77,6 +77,7 @@ impl Line {
     pub fn prev(&self, pos: usize) -> usize {
         self.text.floor_char_boundary(pos.saturating_sub(1))
     }
+
     pub fn next(&self, pos: usize, past_end: bool) -> usize {
         if pos.saturating_add(1) >= self.text.len() {
             if past_end {
@@ -234,11 +235,16 @@ impl BufferRef {
             inner: self.inner.write().unwrap(),
         }
     }
+
+    pub fn id(&self) -> Id {
+        self.id
+    }
 }
 
 impl Clone for BufferRef {
     fn clone(&self) -> Self {
         Self {
+            id: self.id,
             inner: Arc::clone(&self.inner),
         }
     }

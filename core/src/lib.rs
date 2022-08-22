@@ -1,4 +1,4 @@
-#![feature(round_char_boundary)]
+#![feature(round_char_boundary, panic_update_hook, concat_idents)]
 
 mod args;
 mod buffer;
@@ -7,11 +7,12 @@ mod cursor;
 mod keymap;
 mod util;
 mod window;
+mod options;
 
 use crate::buffer::BufferSelect;
 use std::{
-    io::{Stdout, StdoutLock, Write},
-    time::Duration,
+    io::{Stdout, StdoutLock, Write, Read},
+    time::Duration, path::{PathBuf, Path}, fs::File,
 };
 
 use args::Args;
@@ -34,8 +35,9 @@ use crossterm::{
 use cursor::Cursor;
 use keymap::{Action, KeyState, MapAction, MapSet};
 use log::{error, info};
+use options::Options;
 use util::{Area, Pos};
-use vimscript::{Id, IdProcuder, State, VimScriptCtx};
+use vimscript::{Id, IdProcuder, State, VimScriptCtx, VimError, Value};
 use window::{Scroll, WinMode, Window};
 
 pub use crossterm::Result;
@@ -69,7 +71,6 @@ pub enum WindowSet {
     Window(Window),
     Horizontal(Vec<WindowSet>, usize, Area),
     Vertical(Vec<WindowSet>, usize, Area),
-    TabSet(Vec<WindowSet>, usize, Area),
 }
 
 // impl From<&Vec<BufferRef>> for WindowSet {
@@ -80,7 +81,7 @@ impl WindowSet {
         if buffers.len() == 1 {
             Self::Window(Window::new(ids.get(), buffers[0].clone()))
         } else {
-            Self::TabSet(
+            Self::Horizontal(
                 buffers
                     .iter()
                     .map(|b| Self::Window(Window::new(ids.get(), b.clone())))
@@ -97,7 +98,6 @@ impl WindowSet {
             Self::Horizontal(set, focused, _) | Self::Vertical(set, focused, _) => {
                 set[*focused].get_focus()
             }
-            Self::TabSet(set, focused, _) => set[*focused].get_focus(),
         }
     }
 
@@ -107,14 +107,13 @@ impl WindowSet {
             Self::Horizontal(set, focused, _) | Self::Vertical(set, focused, _) => {
                 set[*focused].get_focus_mut()
             }
-            Self::TabSet(set, focused, _) => set[*focused].get_focus_mut(),
         }
     }
 
     pub fn redraw_all(&mut self) {
         match self {
             Self::Window(w) => w.redraw_all(),
-            Self::Horizontal(set, _, _) | Self::Vertical(set, _, _) | Self::TabSet(set, _, _) => {
+            Self::Horizontal(set, _, _) | Self::Vertical(set, _, _) => {
                 for s in set.iter_mut() {
                     s.redraw_all();
                 }
@@ -174,35 +173,6 @@ impl WindowSet {
                 }
                 Scroll::Left | Scroll::Right => set[*focused].move_focus(motion),
             },
-            Self::TabSet(set, focused, _) => match motion {
-                Scroll::Left => {
-                    if set[*focused].move_focus(motion) {
-                        true
-                    } else if *focused == 0 {
-                        false
-                    } else {
-                        let area = set[*focused].area();
-                        *focused -= 1;
-                        set[*focused].set_area(area);
-                        set[*focused].redraw_all();
-                        true
-                    }
-                }
-                Scroll::Right => {
-                    if set[*focused].move_focus(motion) {
-                        true
-                    } else if *focused >= set.len() - 1 {
-                        false
-                    } else {
-                        let area = set[*focused].area();
-                        *focused += 1;
-                        set[*focused].set_area(area);
-                        set[*focused].redraw_all();
-                        true
-                    }
-                }
-                Scroll::Up | Scroll::Down => set[*focused].move_focus(motion),
-            },
         }
     }
 
@@ -219,27 +189,15 @@ impl WindowSet {
                 }
                 false
             }
-            Self::TabSet(set, focused, _) => {
-                for (i, s) in set.iter_mut().enumerate() {
-                    if s.jump_to(criteria) {
-                        let area = s.area();
-                        *focused = i;
-                        s.set_area(area);
-                        s.redraw_all();
-                        return true;
-                    }
-                }
-                false
-            }
         }
     }
 
     fn buffer(&self) -> &BufferRef {
         match self {
             Self::Window(w) => w.buffer(),
-            Self::Horizontal(set, focused, _)
-            | Self::Vertical(set, focused, _)
-            | Self::TabSet(set, focused, _) => set[*focused].buffer(),
+            Self::Horizontal(set, focused, _) | Self::Vertical(set, focused, _) => {
+                set[*focused].buffer()
+            }
         }
     }
 
@@ -256,7 +214,7 @@ impl WindowSet {
                 }
                 self.set_area(area);
             }
-            Self::TabSet(set, focused, _) | Self::Horizontal(set, focused, _) => {
+            Self::Horizontal(set, focused, _) => {
                 set[*focused].split_vertical(new);
             }
             Self::Vertical(v, _, area) => {
@@ -280,7 +238,7 @@ impl WindowSet {
                 }
                 self.set_area(area);
             }
-            Self::TabSet(set, focused, _) | Self::Vertical(set, focused, _) => {
+            Self::Vertical(set, focused, _) => {
                 set[*focused].split_horizontal(new);
             }
             Self::Horizontal(v, _, area) => {
@@ -295,18 +253,16 @@ impl WindowSet {
     fn remove_window(&mut self, id: Id) -> bool {
         match self {
             Self::Window(w) => w.id() == id,
-            Self::Vertical(set, focused, area)
-            | Self::Horizontal(set, focused, area)
-            | Self::TabSet(set, focused, area) => {
+            Self::Vertical(set, focused, area) | Self::Horizontal(set, focused, area) => {
                 let area = *area;
-                if let Some(idx) = set.iter().position(|w| w.remove_window(id)) {
+                if let Some(idx) = set.iter_mut().position(|w| w.remove_window(id)) {
                     if *focused > idx {
                         *focused -= 1;
                     }
                     set.remove(idx);
                 }
                 if set.len() == 1 {
-                    let w = set.remove(0);
+                    let mut w = set.remove(0);
                     std::mem::swap(self, &mut w);
                 }
                 self.set_area(area);
@@ -362,22 +318,13 @@ impl Renderable for WindowSet {
                     set.set_area(area);
                 }
             }
-            Self::TabSet(set, focused, area) => {
-                *area = new_area;
-                set[*focused].set_area(Area {
-                    x: new_area.x,
-                    y: new_area.y + 1,
-                    w: new_area.w,
-                    h: new_area.h - 1,
-                });
-            }
         }
     }
 
     fn area(&self) -> Area {
         match self {
             Self::Window(w) => w.area(),
-            Self::Horizontal(_, _, a) | Self::Vertical(_, _, a) | Self::TabSet(_, _, a) => *a,
+            Self::Horizontal(_, _, a) | Self::Vertical(_, _, a) => *a,
         }
     }
 
@@ -390,22 +337,6 @@ impl Renderable for WindowSet {
             Self::Window(w) => w.draw(term),
             Self::Vertical(set, _, _) | Self::Horizontal(set, _, _) => {
                 set.iter_mut().try_for_each(|w| w.draw(term))
-            }
-            Self::TabSet(set, focused, area) => {
-                term.queue(SetBackgroundColor(Color::DarkGrey))?;
-                area.top(1).clear(term)?;
-                area.pos().move_cursor(term)?;
-                for (i, s) in set.iter().enumerate() {
-                    let buf = s.buffer().read();
-                    let style = if i == *focused {
-                        ContentStyle::new().with(Color::Yellow)
-                    } else {
-                        ContentStyle::new().with(Color::White)
-                    };
-                    write!(term, "{}", style.apply(format_args!(" {} ", buf.title())))?;
-                }
-                term.queue(SetBackgroundColor(Color::Reset))?;
-                set[*focused].draw(term)
             }
         }
     }
@@ -454,6 +385,21 @@ impl Vim {
         }
     }
 
+    pub fn exec_file(&mut self, file: impl AsRef<Path>) {
+        self.ctx.set_script(Some(self.inner.get_next_script_id()));
+        match self.exec_file_inner(file) {
+            Ok(()) => (),
+            Err(e) => self.inner.message(format!("{e:?}")),
+        }
+        self.ctx.set_script(None);
+    }
+
+    fn exec_file_inner(&mut self, file: impl AsRef<Path>) -> std::result::Result<(), VimError> {
+        let mut s = String::new();
+        File::open(file)?.read_to_string(&mut s)?;
+        self.ctx.run(s.as_str(), &mut self.inner)
+    }
+
     fn on_event(&mut self, event: Event) {
         match event {
             Event::Resize(c, r) => self.inner.update_area((c, r)),
@@ -494,6 +440,7 @@ impl Default for Vim {
 
 pub struct VimInner {
     args: Args,
+    options: Options,
     buffers: Vec<BufferRef>,
     windows: WindowSet,
     focus: usize,
@@ -519,6 +466,10 @@ impl State for VimInner {
             self.message(format!("{}", msg));
         }
     }
+
+    fn get_option(&self, name: &str) -> std::result::Result<Value, VimError> {
+        self.options.get(name)
+    }
 }
 
 impl Default for VimInner {
@@ -543,6 +494,7 @@ impl VimInner {
         }
         Self {
             args,
+            options: Options::new(),
             windows: WindowSet::new(&mut window_id, &buffers),
             buffers,
             floating: vec![],
@@ -557,6 +509,10 @@ impl VimInner {
             window_id,
             script_id,
         }
+    }
+
+    pub fn get_options(&self) -> &Options {
+        &self.options
     }
 
     pub fn start_cli(&mut self, ty: Cli) {
@@ -684,6 +640,32 @@ impl VimInner {
             self.message(format!("{e}"));
         }
     }
+
+    pub fn create_empty_buffer(&mut self) -> BufferRef {
+        let buffer = BufferRef::empty(&mut self.buffer_id);
+        self.buffers.push(buffer.clone());
+        buffer
+    }
+
+    pub fn open_file(&mut self, path: impl Into<PathBuf>) -> Result<BufferRef> {
+        let buffer = BufferRef::from_file(&mut self.buffer_id, path)?;
+        self.buffers.push(buffer.clone());
+        Ok(buffer)
+    }
+
+    pub fn split_vertical(&mut self, buffer: BufferRef) {
+        self.windows
+            .split_vertical(Window::new(self.window_id.get(), buffer));
+    }
+
+    pub fn split_horizontal(&mut self, buffer: BufferRef) {
+        self.windows
+            .split_horizontal(Window::new(self.window_id.get(), buffer));
+    }
+
+    fn get_next_script_id(&mut self) -> Id {
+        self.script_id.get()
+    }
 }
 
 pub struct Curse<W: Lockable> {
@@ -706,6 +688,10 @@ impl<W: Lockable> Curse<W> {
     }
 
     pub fn run(mut self) -> Result<()> {
+        std::panic::update_hook(|prev, info| {
+            prev(info);
+            panic_cleanup(info);
+        });
         enable_raw_mode()?;
         {
             let mut lock = self.terminal.lock();
@@ -713,7 +699,6 @@ impl<W: Lockable> Curse<W> {
             lock.queue(EnterAlternateScreen)?;
             lock.queue(EnableMouseCapture)?;
         }
-        std::panic::set_hook(Box::new(panic_cleanup));
         self.event_loop()?;
         disable_raw_mode()?;
         {

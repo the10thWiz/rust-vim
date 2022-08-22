@@ -84,10 +84,17 @@ pub fn parse<S: State + 'static>(
         expr = remaining.trim();
     }
     function_call_extract(&mut parsed);
+    let mut last = &ExprPeice::Op("");
     for token in parsed.iter_mut() {
         if let ExprPeice::Var(s) = token {
-            *token = ExprPeice::Value(ctx.lookup(s)?.clone());
+            let val = if matches!(last, ExprPeice::Op("&")) {
+                state.get_option(s)?
+            } else {
+                ctx.lookup(s)?.clone()
+            };
+            *token = ExprPeice::Value(val);
         }
+        last = token;
     }
     while parsed.len() > 1 {
         let mut changed = false;

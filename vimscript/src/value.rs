@@ -69,6 +69,43 @@ pub enum Value {
     Nil,
 }
 
+impl From<isize> for Value {
+    fn from(v: isize) -> Self {
+        Self::Integer(v)
+    }
+}
+impl From<f64> for Value {
+    fn from(v: f64) -> Self {
+        Self::Number(v)
+    }
+}
+impl From<String> for Value {
+    fn from(v: String) -> Self {
+        Self::Str(v)
+    }
+}
+impl From<&str> for Value {
+    fn from(v: &str) -> Self {
+        Self::Str(v.to_string())
+    }
+}
+impl From<bool> for Value {
+    fn from(v: bool) -> Self {
+        Self::Bool(v)
+    }
+}
+
+impl<T: Into<Value>> From<Option<T>> for Value {
+    fn from(v: Option<T>) -> Self {
+        v.map_or(Self::Nil, |v| v.into())
+    }
+}
+impl<T: Into<Value> + Clone> From<&T> for Value {
+    fn from(v: &T) -> Self {
+        v.clone().into()
+    }
+}
+
 impl Value {
     pub fn str(s: impl Into<String>) -> Self {
         Self::Str(s.into())
@@ -135,7 +172,9 @@ impl Value {
             Value::Object(o) => std::iter::once("{".to_string())
                 .chain(
                     o.iter()
-                        .flat_map(|(n, v)| [n.clone(), ":".to_string(), v.to_string(ctx)].into_iter())
+                        .flat_map(|(n, v)| {
+                            [n.clone(), ":".to_string(), v.to_string(ctx)].into_iter()
+                        })
                         .intersperse(",".to_string()),
                 )
                 .chain(std::iter::once("}".to_string()))

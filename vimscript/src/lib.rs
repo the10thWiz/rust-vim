@@ -12,7 +12,7 @@ use value::Names;
 
 use crate::namespace::NameSpaced;
 use crate::value::Function;
-use crate::value::Value;
+pub use crate::value::Value;
 use crate::value::VimFunction;
 use std::collections::HashMap;
 use std::fmt::Arguments;
@@ -23,10 +23,12 @@ use std::time::Instant;
 pub trait State: 'static {
     fn set_silent(&mut self, silent: bool);
     fn echo(&mut self, msg: Arguments);
+    fn get_option(&self, name: &str) -> Result<Value, VimError>;
 }
 
 #[derive(Debug)]
 pub enum VimError {
+    Io(std::io::Error),
     UnexpectedKeyword(&'static str),
     UnexpectedEof,
     Exit,
@@ -39,16 +41,22 @@ pub enum VimError {
     CommandUndefined,
     TimeOut,
     WrongArgCount,
+    InvalidValue,
 }
 
 impl From<NamespaceError> for VimError {
-    fn from(n: NamespaceError) -> Self {
-        Self::NamespaceError(n)
+    fn from(e: NamespaceError) -> Self {
+        Self::NamespaceError(e)
     }
 }
 impl From<ValueError> for VimError {
-    fn from(n: ValueError) -> Self {
-        Self::ValError(n)
+    fn from(e: ValueError) -> Self {
+        Self::ValError(e)
+    }
+}
+impl From<std::io::Error> for VimError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
     }
 }
 
@@ -674,6 +682,9 @@ mod tests {
     impl State for TestContext {
         fn set_silent(&mut self, _s: bool) {}
         fn echo(&mut self, _msg: Arguments) {}
+        fn get_option(&self, _name: &str) -> Result<Value, VimError> {
+            Err(VimError::VariableUndefined)
+        }
     }
 
     pub fn test_ctx() -> VimScriptCtx<TestContext> {

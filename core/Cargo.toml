@@ -15,3 +15,4 @@ bitfield = "*"
 clap = { version = "*", features = ["derive"] }
 backtrace = "0.3"
 vimscript = { path = "../vimscript/" }
+bevy_reflect = "*"
