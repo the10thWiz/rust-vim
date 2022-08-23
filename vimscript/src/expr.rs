@@ -8,10 +8,13 @@ use std::collections::{HashMap, LinkedList};
 
 use crate::{value::Value, State, VimError, VimScriptCtx};
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ValueError {
+    #[error("String is not terminated")]
     UnterminatedString,
+    #[error("Unexpected Symbol in value")]
     UnexpectedSymbol,
+    #[error("Expression is not valid")]
     InvalidExpression,
 }
 

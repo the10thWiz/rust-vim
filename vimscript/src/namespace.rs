@@ -7,10 +7,12 @@
 use std::collections::HashMap;
 
 type Result<T> = std::result::Result<T, NamespaceError>;
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum NamespaceError {
+    #[error("{0:?} is not defined in the current context")]
     NamespaceNotDefined(Namespace),
-    UnknownNamespace,
+    #[error("Namespace {0}: is not defined")]
+    UnknownNamespace(char),
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Default)]
@@ -50,7 +52,7 @@ impl Namespace {
         } else if s.starts_with("v:") {
             Ok(Self::Builtin)
         } else if s.contains(':') {
-            Err(NamespaceError::UnknownNamespace)
+            Err(NamespaceError::UnknownNamespace(s.chars().next().unwrap_or('!')))
         } else if s.starts_with(|c: char| c.is_uppercase()) {
             Ok(Self::Global)
         } else {

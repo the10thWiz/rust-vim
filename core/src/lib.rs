@@ -35,7 +35,7 @@ use crossterm::{
 use cursor::Cursor;
 use keymap::{Action, KeyState, MapAction, MapSet};
 use log::{error, info};
-use options::Options;
+use options::{Opts, Options};
 use util::{Area, Pos};
 use vimscript::{Id, IdProcuder, State, VimScriptCtx, VimError, Value};
 use window::{Scroll, WinMode, Window};
@@ -472,7 +472,7 @@ impl State for VimInner {
     }
 
     fn get_option(&self, name: &str) -> std::result::Result<Value, VimError> {
-        self.options.get(name)
+        self.options.get(name).map(|v| v.into())
     }
 }
 
@@ -522,10 +522,16 @@ impl VimInner {
                 ret += &var[..idx];
                 var = &var[idx..];
                 let end = var.find(|c: char| !c.is_alphanumeric()).unwrap_or(var.len());
-                if let Ok(val) = std::env::var(&var[..end]) {
+                if let Ok(val) = std::env::var(&var[1..end]) {
                     ret += &val;
+                } else if &var[1..end] == "XDG_CONFIG_HOME" {
+                    ret += std::env::var("HOME").unwrap_or("~".to_string()).as_str();
+                    ret += "/.config";
+                } else if &var[1..end] == "XDG_DATA_HOME" {
+                    ret += std::env::var("HOME").unwrap_or("~".to_string()).as_str();
+                    ret += "/.cache";
                 }
-                var = &var[..end];
+                var = &var[end..];
             }
             ret += var;
             Cow::Owned(ret)
@@ -537,11 +543,8 @@ impl VimInner {
     pub fn find_on_rtp(&self, name: impl AsRef<str>) -> std::result::Result<File, io::Error> {
         let name = name.as_ref();
         for path in self.options.runtimepath.split(',') {
-            // TODO: shell expand path & name
-            if let Ok(mut dir) = std::fs::read_dir(self.shell_expand(path).as_ref()) {
-                if let Some(tmp) = dir.filter_map(|p| p.ok()).find(|p| p.file_name() == name) {
-                    return File::open(tmp.path());
-                }
+            if let Ok(f) = File::open(self.shell_expand(format!("{path}/{name}").as_str()).as_ref()) {
+                return Ok(f);
             }
         }
         Err(io::Error::new(ErrorKind::NotFound, "File was not found on 'runtimepath'"))
@@ -565,8 +568,12 @@ impl VimInner {
         // yet)
     }
 
-    pub fn get_options(&self) -> &Options {
+    pub fn options(&self) -> &Options {
         &self.options
+    }
+
+    pub fn options_mut(&mut self) -> &mut Options {
+        &mut self.options
     }
 
     pub fn start_cli(&mut self, ty: Cli) {

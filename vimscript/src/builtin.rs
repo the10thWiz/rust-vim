@@ -35,7 +35,7 @@ macro_rules! nargs {
             if let Ok([$($param,)*]) = tmp {
                 Ok($expr)
             } else {
-                Err(VimError::WrongArgCount)
+                Err(VimError::WrongArgCount(nargs!(@COUNT $($param)*)))
             }
         })))
     };
@@ -49,7 +49,7 @@ macro_rules! nargs {
                     Err(VimError::Exit)
                 }
             } else {
-                Err(VimError::WrongArgCount)
+                Err(VimError::WrongArgCount(nargs!(@COUNT $($param)*)))
             }
         })))
     };

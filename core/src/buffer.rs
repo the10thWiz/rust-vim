@@ -16,7 +16,7 @@ use std::{
 use crossterm::style::ContentStyle;
 use vimscript::{IdProcuder, Id};
 
-use crate::Result;
+use crate::{Result, options::{BufOptions, Opts}};
 
 pub trait BufferSelect {
     fn select(&self, buffer: &Buffer) -> bool;
@@ -98,6 +98,7 @@ impl Line {
 pub struct Buffer {
     data: Vec<Line>,
     filename: Option<PathBuf>,
+    options: BufOptions,
 }
 
 impl Buffer {
@@ -105,6 +106,7 @@ impl Buffer {
         Self {
             data: vec![Line::empty()],
             filename: None,
+            options: BufOptions::new(),
         }
     }
 
@@ -116,7 +118,16 @@ impl Buffer {
                 .map(|l| Ok(Line::new(l?)))
                 .collect::<Result<Vec<Line>>>()?,
             filename: Some(path),
+            options: BufOptions::new(),
         })
+    }
+
+    pub fn options(&self) -> &BufOptions {
+        &self.options
+    }
+
+    pub fn options_mut(&mut self) -> &mut BufOptions {
+        &mut self.options
     }
 
     pub fn write_file(&mut self) -> Result<()> {
@@ -234,6 +245,20 @@ impl BufferRef {
         BufferWrite {
             inner: self.inner.write().unwrap(),
         }
+    }
+
+    pub fn with_read<T>(&self, f: impl FnOnce(&BufferRead<'_>) -> T) -> T {
+        let lock = self.read();
+        let ret = f(&lock);
+        drop(lock);
+        ret
+    }
+
+    pub fn with_write<T>(&self, f: impl FnOnce(&mut BufferWrite<'_>) -> T) -> T {
+        let mut lock = self.write();
+        let ret = f(&mut lock);
+        drop(lock);
+        ret
     }
 
     pub fn id(&self) -> Id {

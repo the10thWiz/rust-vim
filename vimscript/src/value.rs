@@ -13,6 +13,7 @@ use crate::State;
 use crate::Tokenizer;
 use crate::VimError;
 use crate::VimScriptCtx;
+use std::borrow::Cow;
 use std::collections::hash_map;
 use std::collections::linked_list;
 use std::collections::{HashMap, LinkedList};
@@ -55,6 +56,79 @@ impl VimFunction {
 pub enum Function<S> {
     VimScript(Arc<VimFunction>),
     Builtin(Arc<dyn BuiltinFunction<S>>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ValueRef<'a> {
+    Integer(isize),
+    Number(f64),
+    Str(Cow<'a, str>),
+    Bool(bool),
+    Object(&'a HashMap<String, Value>),
+    List(&'a LinkedList<Value>),
+    Function(Cow<'a, str>),
+    Nil,
+}
+
+impl<'a> From<isize> for ValueRef<'a> {
+    fn from(v: isize) -> Self {
+        Self::Integer(v)
+    }
+}
+impl<'a> From<f64> for ValueRef<'a> {
+    fn from(v: f64) -> Self {
+        Self::Number(v)
+    }
+}
+impl<'a> From<bool> for ValueRef<'a> {
+    fn from(v: bool) -> Self {
+        Self::Bool(v)
+    }
+}
+impl<'a> From<&'a str> for ValueRef<'a> {
+    fn from(v: &'a str) -> Self {
+        Self::Str(Cow::Borrowed(v))
+    }
+}
+impl<'a> From<&'a String> for ValueRef<'a> {
+    fn from(v: &'a String) -> Self {
+        Self::Str(Cow::Borrowed(v.as_str()))
+    }
+}
+impl<'a, T: Into<ValueRef<'a>> + Copy> From<&T> for ValueRef<'a> {
+    fn from(v: &T) -> Self {
+        T::into(*v)
+    }
+}
+
+impl Display for ValueRef<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Integer(i) => write!(f, "{}", i),
+            Self::Number(n) => write!(f, "{}", n),
+            Self::Str(s) => write!(f, "{}", s),
+            Self::Bool(b) => write!(f, "{}", b),
+            Self::Object(_) => write!(f, "{{ -- }}"),
+            Self::List(_) => write!(f, "[ -- ]"),
+            Self::Function(name) => write!(f, "<Function@{}>", name),
+            Self::Nil => write!(f, "v:null"),
+        }
+    }
+}
+
+impl From<ValueRef<'_>> for Value {
+    fn from(v: ValueRef<'_>) -> Self {
+        match v {
+            ValueRef::Integer(v) => Self::Integer(v),
+            ValueRef::Number(v) => Self::Number(v),
+            ValueRef::Str(v) => Self::Str(v.to_string()),
+            ValueRef::Bool(v) => Self::Bool(v),
+            ValueRef::Object(v) => Self::Object(v.clone()),
+            ValueRef::List(v) => Self::List(v.clone()),
+            ValueRef::Function(v) => Self::Function(v.to_string()),
+            ValueRef::Nil => Self::Nil,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

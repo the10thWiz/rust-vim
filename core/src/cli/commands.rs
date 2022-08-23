@@ -42,4 +42,7 @@ pub fn default(reg: &mut VimScriptCtx<VimInner>) {
         let res = v.get_focus().buffer().write().write_file();
         v.err(res);
     });
+    multi(reg, ["se", "set"], crate::options::set_option);
+    multi(reg, ["setl", "setlocal"], crate::options::set_local);
+    multi(reg, ["setg", "setglobal"], crate::options::set_global);
 }

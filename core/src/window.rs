@@ -17,6 +17,7 @@ use vimscript::Id;
 use crate::buffer::{BufferRef, BufferSelect, Signs};
 use crate::cursor::CursorShape;
 use crate::keymap::{Action, KeyState};
+use crate::options::{WinOptions, Opts};
 use crate::util::Pos;
 use crate::Vim;
 use crate::{cursor::Motion, Area, Cursor, EventReader, Renderable};
@@ -175,6 +176,7 @@ pub struct Window {
     window_updates: WindowProps,
     cursor: Cursor,
     mode: WinMode,
+    options: WinOptions,
 }
 
 impl Window {
@@ -191,11 +193,20 @@ impl Window {
             window_updates: WindowProps::all(),
             cursor: Cursor::new(),
             mode: WinMode::Normal,
+            options: WinOptions::new(),
         }
     }
 
     pub fn id(&self) -> Id {
         self.id
+    }
+
+    pub fn options(&self) -> &WinOptions {
+        &self.options
+    }
+
+    pub fn options_mut(&mut self) -> &mut WinOptions {
+        &mut self.options
     }
 
     pub fn buffer_select(&self, criteria: &impl BufferSelect) -> bool {

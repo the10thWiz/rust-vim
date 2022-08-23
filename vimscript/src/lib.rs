@@ -6,19 +6,23 @@ mod namespace;
 mod value;
 
 use expr::ValueError;
-pub use namespace::{ Id, IdProcuder };
 use namespace::NamespaceError;
+pub use namespace::{Id, IdProcuder};
 use value::Names;
 
 use crate::namespace::NameSpaced;
 use crate::value::Function;
-pub use crate::value::Value;
 use crate::value::VimFunction;
+pub use crate::value::{Value, ValueRef};
 use std::collections::HashMap;
+use std::convert::Infallible;
 use std::fmt::Arguments;
+use std::num::ParseIntError;
+use std::str::ParseBoolError;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
+use thiserror::Error;
 
 pub trait State: 'static {
     fn set_silent(&mut self, silent: bool);
@@ -26,37 +30,49 @@ pub trait State: 'static {
     fn get_option(&self, name: &str) -> Result<Value, VimError>;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum VimError {
-    Io(std::io::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("Key word not expected in current context")]
     UnexpectedKeyword(&'static str),
+    #[error("Expected closing statements")]
     UnexpectedEof,
+    #[error("Exiting early")]
     Exit,
+    #[error("Parameters were invalid")]
     InvalidParams,
+    #[error("Expected something else")]
     Expected(&'static str),
-    NamespaceError(NamespaceError),
-    ValError(ValueError),
-    VariableUndefined,
-    FunctionUndefined,
-    CommandUndefined,
+    #[error(transparent)]
+    NamespaceError(#[from] NamespaceError),
+    #[error(transparent)]
+    ValError(#[from] ValueError),
+    #[error("Variable {0} is not defined")]
+    VariableUndefined(String),
+    #[error("Function {0} is not defined")]
+    FunctionUndefined(String),
+    #[error("Command {0} is not defined")]
+    CommandUndefined(String),
+    #[error("Execution took to long")]
     TimeOut,
-    WrongArgCount,
-    InvalidValue,
+    #[error("Wrong number of arguments, expected {0} args")]
+    WrongArgCount(usize),
+    #[error(transparent)]
+    InvalidInt(#[from] ParseIntError),
+    #[error(transparent)]
+    InvalidBool(#[from] ParseBoolError),
+    #[error("Expected any of {0:?}")]
+    ExpectedOne(&'static [&'static str]),
+    #[error("Expected comma seperated list of {0:?}")]
+    ExpectedMany(&'static [&'static str]),
+    #[error("Not a boolean value")]
+    NotABool,
 }
 
-impl From<NamespaceError> for VimError {
-    fn from(e: NamespaceError) -> Self {
-        Self::NamespaceError(e)
-    }
-}
-impl From<ValueError> for VimError {
-    fn from(e: ValueError) -> Self {
-        Self::ValError(e)
-    }
-}
-impl From<std::io::Error> for VimError {
-    fn from(e: std::io::Error) -> Self {
-        Self::Io(e)
+impl From<Infallible> for VimError {
+    fn from(e: Infallible) -> Self {
+        match e {}
     }
 }
 
@@ -415,7 +431,7 @@ impl<S: State + 'static> VimScriptCtx<S> {
                     Arc::clone(cmd).execute(line.range, line.bang, line.params, self, state);
                     Ok(())
                 } else {
-                    Err(VimError::CommandUndefined)
+                    Err(VimError::CommandUndefined(line.command.to_string()))
                 }
             })?,
         }
@@ -451,7 +467,7 @@ impl<S: State + 'static> VimScriptCtx<S> {
                 ret
             }
             Some(Function::Builtin(f)) => Arc::clone(f).execute(args, self, state),
-            None => Err(VimError::FunctionUndefined),
+            None => Err(VimError::FunctionUndefined(f.to_string())),
         }
     }
 
@@ -464,9 +480,10 @@ impl<S: State + 'static> VimScriptCtx<S> {
     }
 
     pub fn lookup(&self, variable: impl AsRef<str>) -> Result<&Value, VimError> {
+        let variable = variable.as_ref();
         self.variables
             .get(variable)?
-            .map_or(Err(VimError::VariableUndefined), Ok)
+            .map_or(Err(VimError::VariableUndefined(variable.to_string())), Ok)
     }
 
     pub fn insert_var(
@@ -551,7 +568,7 @@ impl<'a> Tokenizer<'a> {
                 }
                 Ok(None)
             }
-            Self::Iter(iter) => Ok(iter.next().map(|l| l.as_ref()))
+            Self::Iter(iter) => Ok(iter.next().map(|l| l.as_ref())),
         }
     }
 
@@ -584,7 +601,7 @@ impl<'a> Line<'a> {
             range,
             command,
             bang,
-            params: params.trim(),
+            params: params.trim_start(),
         }))
     }
 
