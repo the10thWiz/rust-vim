@@ -34,15 +34,17 @@ pub trait State: 'static {
 pub enum VimError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
-    #[error("Key word not expected in current context")]
+    #[error("Key word {0} not expected in current context")]
     UnexpectedKeyword(&'static str),
     #[error("Expected closing statements")]
     UnexpectedEof,
     #[error("Exiting early")]
     Exit,
-    #[error("Parameters were invalid")]
-    InvalidParams,
-    #[error("Expected something else")]
+    #[error("Command does not accept a range parameter")]
+    RangeNotSupported,
+    #[error("Command does not accept a bang")]
+    BangNotSupported,
+    #[error("Expected {0}")]
     Expected(&'static str),
     #[error(transparent)]
     NamespaceError(#[from] NamespaceError),
@@ -383,8 +385,10 @@ impl<S: State + 'static> VimScriptCtx<S> {
                 }
             }
             "let" => run.act(line, |line| {
-                if line.range.is_some() || line.bang {
-                    Err(VimError::InvalidParams)
+                if line.range.is_some() {
+                    Err(VimError::RangeNotSupported)
+                } else if line.bang {
+                    Err(VimError::BangNotSupported)
                 } else if let Some((name, val)) = line.params.split_once('=') {
                     let val = self.eval(val, state)?;
                     self.variables.insert(name.trim(), val)?;
@@ -448,7 +452,7 @@ impl<S: State + 'static> VimScriptCtx<S> {
                 VimFunction::new(args.split(',').map(|a| a.trim().to_string()).collect()),
             ))
         } else {
-            Err(VimError::InvalidParams)
+            Err(VimError::Expected("Function arguments"))
         }
     }
 

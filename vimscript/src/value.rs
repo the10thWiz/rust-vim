@@ -439,8 +439,12 @@ impl Value {
             _ => todo!(),
         }
     }
+}
 
-    pub fn into_iter(self) -> ValueIter {
+impl IntoIterator for Value {
+    type Item = Self;
+    type IntoIter = ValueIter;
+    fn into_iter(self) -> ValueIter {
         match self {
             Self::List(l) => ValueIter::List(l.into_iter()),
             Self::Object(m) => ValueIter::Object(m.into_iter()),
@@ -499,10 +503,37 @@ pub enum Names<'a> {
 
 impl<'a> Names<'a> {
     pub fn parse(s: &'a str) -> Result<(Self, &'a str), VimError> {
-        if let Some(rem) = s.strip_prefix('[') {
-            todo!("Array destructure")
-        } else if let Some(rem) = s.strip_prefix('{') {
-            todo!("Object destructure")
+        if let Some(mut rem) = s.strip_prefix('[') {
+            let mut ret = vec![];
+            loop {
+                if let Some(rem) = rem.trim().strip_prefix(']') {
+                    return Ok((Self::List(ret), rem));
+                } else if rem.trim() == "" {
+                    return Err(VimError::Expected("]"));
+                }
+                let (name, new_rem) = Self::parse(rem)?;
+                ret.push(name);
+                rem = new_rem;
+            }
+        } else if let Some(mut rem) = s.strip_prefix('{') {
+            let mut ret = vec![];
+            loop {
+                if let Some(rem) = rem.trim().strip_prefix('}') {
+                    return Ok((Self::Object(ret), rem));
+                } else if rem.trim() == "" {
+                    return Err(VimError::Expected("}"));
+                }
+                if let Some((idx, new_rem)) = s.split_once(':') {
+                    let (name, new_rem) = Self::parse(new_rem)?;
+                    ret.push((idx, name));
+                    rem = new_rem;
+                } else if let (Self::Single(name), new_rem) = Self::parse(rem)? {
+                    ret.push((name, Self::Single(name)));
+                    rem = new_rem;
+                } else {
+                    return Err(VimError::Expected(":"));
+                }
+            }
         } else if let Some(idx) = s.find(|c: char| !c.is_alphanumeric()) {
             Ok((Self::Single(&s[..idx]), &s[idx..]))
         } else {
@@ -517,7 +548,26 @@ impl<'a> Names<'a> {
     ) -> Result<(), VimError> {
         match self {
             Self::Single(name) => f(name, v),
-            _ => todo!("Iterate over lists & objects"),
+            Self::List(names) => {
+                if let Value::List(vals) = v {
+                    for (name, val) in names.iter().zip(vals.into_iter()) {
+                        name.iter(val, &mut f)?;
+                    }
+                    Ok(())
+                } else {
+                    Err(VimError::Expected("List"))
+                }
+            }
+            Self::Object(names) => {
+                if let Value::Object(mut vals) = v {
+                    for (idx, name) in names.iter() {
+                        name.iter(vals.remove(*idx).unwrap_or(Value::Nil), &mut f)?;
+                    }
+                    Ok(())
+                } else {
+                    Err(VimError::Expected("Object"))
+                }
+            }
         }
     }
 }

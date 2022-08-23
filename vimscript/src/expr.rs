@@ -24,8 +24,7 @@ enum ExprPeice<'a> {
     Var(&'a str),
     Value(Value),
     FnCall(&'a str),
-    FnValueCall(Value),
-    ListValueIndex(Value),
+    FnValueCall(String),
 }
 
 impl<'a> ExprPeice<'a> {
@@ -73,6 +72,14 @@ impl<'a> ExprPeice<'a> {
     pub fn is_operation(&self) -> bool {
         matches!(self, Self::Op(op) if matches!(op.chars().next(), Some('+' | '.' | '*' | '-' | '/' | '%' | '=' | '!' | '<' | '>')))
     }
+
+    pub fn fn_call(&self) -> Option<&str> {
+        match self {
+            Self::FnCall(s) => Some(s),
+            Self::FnValueCall(s) => Some(s.as_str()),
+            _ => None,
+        }
+    }
 }
 
 pub fn parse<S: State + 'static>(
@@ -101,6 +108,7 @@ pub fn parse<S: State + 'static>(
     }
     while parsed.len() > 1 {
         let mut changed = false;
+        changed |= function_value_call_extract(&mut parsed);
         changed |= function_calls(&mut parsed, ctx, state)?;
         changed |= list(&mut parsed);
         changed |= list_index(&mut parsed, ctx);
@@ -251,6 +259,22 @@ fn function_call_extract(tokens: &mut Vec<ExprPeice>) -> bool {
     changed
 }
 
+fn function_value_call_extract(tokens: &mut Vec<ExprPeice>) -> bool {
+    let mut changed = false;
+    let mut i = 0;
+    while i < tokens.len().saturating_sub(1) {
+        if let ExprPeice::Value(Value::Function(name)) = &tokens[i] {
+            if tokens[i + 1] == ExprPeice::Op("(") {
+                tokens[i] = ExprPeice::FnValueCall(name.clone());
+                tokens.remove(i + 1);
+                changed = true;
+            }
+        }
+        i += 1;
+    }
+    changed
+}
+
 fn function_calls<S: State + 'static>(
     tokens: &mut Vec<ExprPeice>,
     ctx: &mut VimScriptCtx<S>,
@@ -259,7 +283,7 @@ fn function_calls<S: State + 'static>(
     let mut changed = false;
     let mut i = 0;
     while i < tokens.len() {
-        if let ExprPeice::FnCall(_) = &tokens[i] {
+        if tokens[i].fn_call().is_some() {
             let mut t = i + 1;
             let mut end = i;
             while t < tokens.len() {
@@ -283,7 +307,7 @@ fn function_calls<S: State + 'static>(
                         args.push(v)
                     }
                 }
-                if let ExprPeice::FnCall(f) = &tokens[i] {
+                if let Some(f) = tokens[i].fn_call() {
                     tokens[i] = ExprPeice::Value(ctx.run_function(f, args, state)?);
                     changed = true;
                 } else {
@@ -300,7 +324,7 @@ fn parens(tokens: &mut Vec<ExprPeice>) -> bool {
     let mut changed = false;
     let mut i = 0;
     while i < tokens.len().saturating_sub(2) {
-        if tokens[i] == ExprPeice::Op("(") && tokens[i + 2] == ExprPeice::Op(")") {
+        if tokens[i] == ExprPeice::Op("(") && tokens[i + 2] == ExprPeice::Op(")") && (i == 0 || tokens[i - 1].is_operation()) {
             tokens.remove(i + 2);
             tokens.remove(i);
             changed = true;
