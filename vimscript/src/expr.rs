@@ -230,7 +230,7 @@ fn list_index<S>(tokens: &mut Vec<ExprPeice>, ctx: &mut VimScriptCtx<S>) -> bool
                 let index = v.clone();
                 changed = true;
                 if let ExprPeice::Value(v) = tokens.remove(i) {
-                    tokens[i] = ExprPeice::Value(v.index(index, ctx).clone());
+                    tokens[i] = ExprPeice::Value(v.index(&index, ctx).clone());
                 } else {
                     unreachable!("Prevous checked");
                 }

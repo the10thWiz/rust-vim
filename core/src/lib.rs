@@ -8,6 +8,7 @@ mod keymap;
 mod util;
 mod window;
 mod options;
+mod builtin;
 
 use crate::buffer::BufferSelect;
 use std::{
@@ -551,6 +552,7 @@ impl VimInner {
     }
 
     fn init(&mut self, ctx: &mut VimScriptCtx<Self>) {
+        builtin::builtin_functions(ctx);
         if let Ok(mut init) = self.find_on_rtp("init.vim") {
             let mut buf = String::new();
             if let Ok(_) = init.read_to_string(&mut buf) {

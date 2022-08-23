@@ -406,7 +406,7 @@ impl Value {
         Self::Bool(self == rhs)
     }
 
-    pub fn index<S>(&self, idx: Self, ctx: &VimScriptCtx<S>) -> Self {
+    pub fn index<S>(&self, idx: &Self, ctx: &VimScriptCtx<S>) -> Self {
         match self {
             Self::List(l) => {
                 let idx = idx.to_int(ctx);
@@ -437,6 +437,29 @@ impl Value {
             }
             Self::Object(m) => m.get(&idx.to_string(ctx)).unwrap_or(&Self::Nil).clone(),
             _ => todo!(),
+        }
+    }
+
+    pub fn list_len(&self) -> Self {
+        match self {
+            Self::List(l) => Self::Integer(l.len() as isize),
+            _ => Self::Nil,
+        }
+    }
+
+    pub fn list_empty(&self) -> Self {
+        match self {
+            Self::List(l) => Self::Bool(l.is_empty()),
+            _ => Self::Nil,
+        }
+    }
+}
+
+impl PartialEq<&str> for Value {
+    fn eq(&self, other: &&str) -> bool {
+        match self {
+            Self::Str(s) => s == other,
+            _ => false,
         }
     }
 }
