@@ -111,39 +111,39 @@ pub fn parse<S: State + 'static>(
         changed |= function_value_call_extract(&mut parsed);
         changed |= function_calls(&mut parsed, ctx, state)?;
         changed |= list(&mut parsed);
-        changed |= list_index(&mut parsed, ctx);
+        changed |= list_index(&mut parsed, ctx)?;
         changed |= object(&mut parsed, ctx);
         changed |= parens(&mut parsed);
         changed |= unary_expr(
             &mut parsed,
             &[("-", &|rhs| rhs.neg(ctx)), ("!", &|rhs| rhs.not(ctx))],
-        );
+        )?;
         changed |= binary_expr(
             &mut parsed,
             &[
                 ("*", &|lhs, rhs| lhs.mul(rhs, ctx)),
                 ("/", &|lhs, rhs| lhs.div(rhs, ctx)),
             ],
-        );
+        )?;
         changed |= binary_expr(
             &mut parsed,
             &[
                 ("+", &|lhs, rhs| lhs.add(rhs, ctx)),
                 ("-", &|lhs, rhs| lhs.sub(rhs, ctx)),
             ],
-        );
-        changed |= binary_expr(&mut parsed, &[(".", &|lhs, rhs| lhs.concat(rhs, ctx))]);
+        )?;
+        changed |= binary_expr(&mut parsed, &[(".", &|lhs, rhs| lhs.concat(rhs, ctx))])?;
         changed |= binary_expr(
             &mut parsed,
             &[
                 ("<", &|lhs, rhs| lhs.less(rhs, ctx)),
                 (">", &|lhs, rhs| rhs.less(lhs, ctx)),
-                ("<=", &|lhs, rhs| rhs.less(lhs, ctx).not(ctx)),
-                (">=", &|lhs, rhs| lhs.less(rhs, ctx).not(ctx)),
+                ("<=", &|lhs, rhs| rhs.less(lhs, ctx)?.not(ctx)),
+                (">=", &|lhs, rhs| lhs.less(rhs, ctx)?.not(ctx)),
                 ("==", &|lhs, rhs| lhs.equal(rhs, ctx)),
-                ("!=", &|lhs, rhs| lhs.equal(rhs, ctx).not(ctx)),
+                ("!=", &|lhs, rhs| lhs.equal(rhs, ctx)?.not(ctx)),
             ],
-        );
+        )?;
         if !changed {
             todo!("parse {parsed:?}");
         }
@@ -218,7 +218,7 @@ fn list(tokens: &mut Vec<ExprPeice>) -> bool {
     changed
 }
 
-fn list_index<S>(tokens: &mut Vec<ExprPeice>, ctx: &mut VimScriptCtx<S>) -> bool {
+fn list_index<S>(tokens: &mut Vec<ExprPeice>, ctx: &mut VimScriptCtx<S>) -> Result<bool, VimError> {
     let mut changed = false;
     let mut i = 0;
     while i < tokens.len().saturating_sub(3) {
@@ -230,7 +230,7 @@ fn list_index<S>(tokens: &mut Vec<ExprPeice>, ctx: &mut VimScriptCtx<S>) -> bool
                 let index = v.clone();
                 changed = true;
                 if let ExprPeice::Value(v) = tokens.remove(i) {
-                    tokens[i] = ExprPeice::Value(v.index(&index, ctx).clone());
+                    tokens[i] = ExprPeice::Value(v.index(&index, ctx)?.clone());
                 } else {
                     unreachable!("Prevous checked");
                 }
@@ -240,7 +240,7 @@ fn list_index<S>(tokens: &mut Vec<ExprPeice>, ctx: &mut VimScriptCtx<S>) -> bool
         }
         i += 1;
     }
-    changed
+    Ok(changed)
 }
 
 fn function_call_extract(tokens: &mut Vec<ExprPeice>) -> bool {
@@ -324,7 +324,10 @@ fn parens(tokens: &mut Vec<ExprPeice>) -> bool {
     let mut changed = false;
     let mut i = 0;
     while i < tokens.len().saturating_sub(2) {
-        if tokens[i] == ExprPeice::Op("(") && tokens[i + 2] == ExprPeice::Op(")") && (i == 0 || tokens[i - 1].is_operation()) {
+        if tokens[i] == ExprPeice::Op("(")
+            && tokens[i + 2] == ExprPeice::Op(")")
+            && (i == 0 || tokens[i - 1].is_operation())
+        {
             tokens.remove(i + 2);
             tokens.remove(i);
             changed = true;
@@ -334,8 +337,8 @@ fn parens(tokens: &mut Vec<ExprPeice>) -> bool {
     changed
 }
 
-type OpDef<'a> = &'a dyn Fn(Value, Value) -> Value;
-fn binary_expr(tokens: &mut Vec<ExprPeice>, ops: &[(&'static str, OpDef)]) -> bool {
+type OpDef<'a> = &'a dyn Fn(Value, Value) -> Result<Value, VimError>;
+fn binary_expr(tokens: &mut Vec<ExprPeice>, ops: &[(&'static str, OpDef)]) -> Result<bool, VimError> {
     let mut changed = false;
     let mut i = 0;
     while i < tokens.len().saturating_sub(2) {
@@ -343,7 +346,7 @@ fn binary_expr(tokens: &mut Vec<ExprPeice>, ops: &[(&'static str, OpDef)]) -> bo
             if tokens[i + 1] == ExprPeice::Op(op) {
                 if let ExprPeice::Value(rhs) = tokens.remove(i + 2) {
                     if let ExprPeice::Value(lhs) = tokens.remove(i) {
-                        tokens[i] = ExprPeice::Value(f(lhs, rhs));
+                        tokens[i] = ExprPeice::Value(f(lhs, rhs)?);
                         changed = true;
                         break;
                     }
@@ -352,13 +355,15 @@ fn binary_expr(tokens: &mut Vec<ExprPeice>, ops: &[(&'static str, OpDef)]) -> bo
         }
         i += 1;
     }
-    changed
+    Ok(
+        changed
+    )
 }
 
 fn unary_expr(
     tokens: &mut Vec<ExprPeice>,
-    ops: &[(&'static str, &dyn Fn(Value) -> Value)],
-) -> bool {
+    ops: &[(&'static str, &dyn Fn(Value) -> Result<Value, VimError>)],
+) -> Result<bool, VimError> {
     let mut changed = false;
     let mut i = 0;
     while i < tokens.len().saturating_sub(1) {
@@ -369,7 +374,7 @@ fn unary_expr(
             ) && tokens[i] == ExprPeice::Op(op)
             {
                 if let ExprPeice::Value(rhs) = tokens.remove(i + 1) {
-                    tokens[i] = ExprPeice::Value(f(rhs));
+                    tokens[i] = ExprPeice::Value(f(rhs)?);
                     changed = true;
                     break;
                 }
@@ -377,7 +382,9 @@ fn unary_expr(
         }
         i += 1;
     }
-    changed
+    Ok(
+        changed
+    )
 }
 
 #[cfg(test)]

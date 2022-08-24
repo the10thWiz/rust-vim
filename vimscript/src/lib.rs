@@ -1,4 +1,4 @@
-#![feature(iter_intersperse)]
+#![feature(iter_intersperse, pattern)]
 
 pub mod builtin;
 mod expr;
@@ -9,6 +9,7 @@ use expr::ValueError;
 use namespace::NamespaceError;
 pub use namespace::{Id, IdProcuder};
 use value::Names;
+use value::VimType;
 
 use crate::namespace::NameSpaced;
 use crate::value::Function;
@@ -68,6 +69,8 @@ pub enum VimError {
     ExpectedOne(&'static [&'static str]),
     #[error("Expected comma seperated list of {0:?}")]
     ExpectedMany(&'static [&'static str]),
+    #[error("Expected value of type {0:?}")]
+    ExpectedType(VimType),
     #[error("Not a boolean value")]
     NotABool,
 }
@@ -273,7 +276,7 @@ impl<S: State + 'static> VimScriptCtx<S> {
                 }
                 RunTy::Function(f) => f.inner.push(line.to_owned()),
                 RunTy::Now => {
-                    if self.eval(line.params, state)?.to_bool(self) {
+                    if self.eval(line.params, state)?.to_bool(self)? {
                         self.run_inner(script, Section::If, RunTy::Now, state)?;
                     } else {
                         self.run_inner(script, Section::If, RunTy::Skip, state)?;
@@ -286,7 +289,7 @@ impl<S: State + 'static> VimScriptCtx<S> {
                         RunTy::Function(f) => f.inner.push(line.to_owned()),
                         RunTy::SkipEndIf => (),
                         RunTy::Skip => {
-                            if self.eval(line.params, state)?.to_bool(self) {
+                            if self.eval(line.params, state)?.to_bool(self)? {
                                 *run = RunTy::Now;
                             } else {
                                 *run = RunTy::SkipEndIf;
@@ -333,7 +336,7 @@ impl<S: State + 'static> VimScriptCtx<S> {
                 let val = self.eval(expr, state)?;
                 for v in val.into_iter() {
                     self.variables.enter_local();
-                    names.iter(v, |name, v| {
+                    names.iter(v, &mut |name, v| {
                         self.variables
                             .insert(name, v)
                             .map(|_| ())
@@ -353,7 +356,7 @@ impl<S: State + 'static> VimScriptCtx<S> {
                 }
             }
             "while" => {
-                while self.eval(line.params, state)?.to_bool(self) {
+                while self.eval(line.params, state)?.to_bool(self)? {
                     self.run_inner(&mut script.clone(), Section::While, RunTy::Now, state)?;
                 }
                 self.run_inner(script, Section::While, RunTy::Skip, state)?;

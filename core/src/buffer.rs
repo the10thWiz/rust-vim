@@ -170,8 +170,15 @@ impl Buffer {
     }
 
     pub fn insert_char(&mut self, line: usize, col: usize, ch: char) {
-        self.data[line].text.insert(col, ch);
-        self.data[line].update();
+        debug_assert!(line <= self.data.len());
+        if line == self.data.len() {
+            debug_assert!(col == 0);
+            self.data.push(Line::new(String::from(ch)));
+        } else {
+            debug_assert!(col <= self.data[line].text.len());
+            self.data[line].text.insert(col, ch);
+            self.data[line].update();
+        }
     }
 
     pub fn replace_char(&mut self, line: usize, col: usize, ch: char) {

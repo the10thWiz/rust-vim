@@ -1,4 +1,4 @@
-#![feature(round_char_boundary, panic_update_hook, concat_idents)]
+#![feature(round_char_boundary, concat_idents)]
 
 mod args;
 mod buffer;
@@ -13,11 +13,11 @@ mod builtin;
 use crate::buffer::BufferSelect;
 use std::{
     io::{Stdout, StdoutLock, Write, Read, self, ErrorKind},
-    time::Duration, path::{PathBuf, Path}, fs::File, borrow::Cow,
+    time::Duration, path::{PathBuf, Path}, fs::File, borrow::Cow, fmt::Display,
 };
 
 use args::Args;
-use backtrace::Backtrace;
+use backtrace::{Backtrace, BacktraceFmt, BytesOrWideString};
 use buffer::BufferRef;
 use clap::Parser;
 use cli::{Cli, CliState};
@@ -516,36 +516,38 @@ impl VimInner {
         }
     }
 
-    pub fn shell_expand<'v>(&self, mut var: &'v str) -> Cow<'v, str> {
+    pub fn shell_expand<'v>(&self, var: impl Into<Cow<'v, str>>) -> Cow<'v, str> {
+        let var = var.into();
         if var.contains('$') {
+            let mut var = var.as_ref();
             let mut ret = String::new();
-            while let Some(idx) = var.find('$') {
-                ret += &var[..idx];
-                var = &var[idx..];
-                let end = var.find(|c: char| !c.is_alphanumeric()).unwrap_or(var.len());
-                if let Ok(val) = std::env::var(&var[1..end]) {
+            while let Some((prefix, rem)) = var.split_once('$') {
+                ret += prefix;
+                let end = rem.find(|c: char| !c.is_alphanumeric()).unwrap_or(rem.len());
+                if let Ok(val) = std::env::var(&rem[..end]) {
                     ret += &val;
-                } else if &var[1..end] == "XDG_CONFIG_HOME" {
+                } else if &rem[..end] == "XDG_CONFIG_HOME" {
                     ret += std::env::var("HOME").unwrap_or("~".to_string()).as_str();
                     ret += "/.config";
-                } else if &var[1..end] == "XDG_DATA_HOME" {
+                } else if &rem[..end] == "XDG_DATA_HOME" {
                     ret += std::env::var("HOME").unwrap_or("~".to_string()).as_str();
                     ret += "/.cache";
                 }
-                var = &var[end..];
+                var = &rem[end..];
             }
             ret += var;
             Cow::Owned(ret)
         } else {
-            Cow::Borrowed(var)
+            var
         }
     }
 
-    pub fn find_on_rtp(&self, name: impl AsRef<str>) -> std::result::Result<File, io::Error> {
+    pub fn find_on_rtp(&self, name: impl AsRef<str>) -> std::result::Result<(String, File), io::Error> {
         let name = name.as_ref();
         for path in self.options.runtimepath.split(',') {
-            if let Ok(f) = File::open(self.shell_expand(format!("{path}/{name}").as_str()).as_ref()) {
-                return Ok(f);
+            let name = self.shell_expand(format!("{path}/{name}"));
+            if let Ok(f) = File::open(name.as_ref()) {
+                return Ok((name.into_owned(), f));
             }
         }
         Err(io::Error::new(ErrorKind::NotFound, "File was not found on 'runtimepath'"))
@@ -553,7 +555,8 @@ impl VimInner {
 
     fn init(&mut self, ctx: &mut VimScriptCtx<Self>) {
         builtin::builtin_functions(ctx);
-        if let Ok(mut init) = self.find_on_rtp("init.vim") {
+        if let Ok((init_path, mut init)) = self.find_on_rtp("init.vim") {
+            info!("Using {init_path} as init file");
             let mut buf = String::new();
             if let Ok(_) = init.read_to_string(&mut buf) {
                 ctx.set_script(Some(self.get_next_script_id()));
@@ -563,6 +566,8 @@ impl VimInner {
                 }
                 ctx.set_script(None);
             }
+        } else {
+            info!("`init.vim` not found");
         }
         // TODO: potentially run additional init files as requested by the main init file. These
         // can and should be with a seperate script id, and ideally I should allow lazy loading at
@@ -751,10 +756,7 @@ impl<W: Lockable> Curse<W> {
     }
 
     pub fn run(mut self) -> Result<()> {
-        std::panic::update_hook(|prev, info| {
-            prev(info);
-            panic_cleanup(info);
-        });
+        std::panic::set_hook(Box::new(panic_cleanup));
         enable_raw_mode()?;
         {
             let mut lock = self.terminal.lock();
@@ -820,5 +822,5 @@ fn panic_cleanup(info: &std::panic::PanicInfo) {
     } else {
         error!("A Panic occured somewhere");
     }
-    error!("BT: {:?}", Backtrace::new());
+    error!("Full backtrace:\n{:?}", Backtrace::new());
 }

@@ -18,6 +18,7 @@ use std::collections::hash_map;
 use std::collections::linked_list;
 use std::collections::{HashMap, LinkedList};
 use std::fmt::Display;
+use std::str::pattern::Pattern;
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -131,6 +132,18 @@ impl From<ValueRef<'_>> for Value {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VimType {
+    Integer,
+    Number,
+    Str,
+    Bool,
+    Object,
+    List,
+    Function,
+    Nil,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     Integer(isize),
@@ -224,8 +237,8 @@ impl Value {
         }
     }
 
-    pub fn to_bool<S: State + 'static>(&self, ctx: &VimScriptCtx<S>) -> bool {
-        match self {
+    pub fn to_bool<S: State + 'static>(&self, ctx: &VimScriptCtx<S>) -> Result<bool, VimError> {
+        Ok(match self {
             Value::Integer(i) => *i != 0,
             Value::Number(n) => *n != 0.,
             Value::Str(s) => !s.is_empty(),
@@ -234,7 +247,7 @@ impl Value {
             Value::List(l) => !l.is_empty(),
             Value::Function(f) => ctx.get_func(f).is_some(),
             Value::Nil => false,
-        }
+        })
     }
 
     pub fn to_string<S>(&self, ctx: &VimScriptCtx<S>) -> String {
@@ -266,41 +279,41 @@ impl Value {
         }
     }
 
-    pub fn to_int<S>(&self, _ctx: &VimScriptCtx<S>) -> isize {
+    pub fn to_int<S>(&self, _ctx: &VimScriptCtx<S>) -> Result<isize, VimError> {
         match self {
-            Value::Integer(i) => *i,
-            Value::Number(n) => *n as isize,
+            Value::Integer(i) => Ok(*i),
+            Value::Number(n) => Ok(*n as isize),
             Value::Str(_s) => todo!(),
             Value::Bool(b) => {
                 if *b {
-                    1
+                    Ok(1)
                 } else {
-                    0
+                    Ok(0)
                 }
             }
             Value::Object(_o) => todo!(),
             Value::List(_l) => todo!(),
             Value::Function(_f) => todo!(),
-            Value::Nil => 0,
+            Value::Nil => Ok(0),
         }
     }
 
-    pub fn to_num<S>(&self, _ctx: &VimScriptCtx<S>) -> f64 {
+    pub fn to_num<S>(&self, _ctx: &VimScriptCtx<S>) -> Result<f64, VimError> {
         match self {
-            Value::Integer(i) => *i as f64,
-            Value::Number(n) => *n,
+            Value::Integer(i) => Ok(*i as f64),
+            Value::Number(n) => Ok(*n),
             Value::Str(_s) => todo!(),
             Value::Bool(b) => {
                 if *b {
-                    1.
+                    Ok(1.)
                 } else {
-                    0.
+                    Ok(0.)
                 }
             }
             Value::Object(_o) => todo!(),
             Value::List(_l) => todo!(),
             Value::Function(_f) => todo!(),
-            Value::Nil => 0.,
+            Value::Nil => Ok(0.),
         }
     }
 
@@ -343,73 +356,73 @@ impl Value {
         }
     }
 
-    pub fn add<S>(self, rhs: Self, ctx: &VimScriptCtx<S>) -> Self {
-        match (self, rhs) {
+    pub fn add<S>(self, rhs: Self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        Ok(match (self, rhs) {
             (Self::Integer(l), Self::Integer(r)) => Self::Integer(l + r),
-            (l, r) => Self::Number(l.to_num(ctx) + r.to_num(ctx)),
-        }
+            (l, r) => Self::Number(l.to_num(ctx)? + r.to_num(ctx)?),
+        })
     }
 
-    pub fn sub<S>(self, rhs: Self, ctx: &VimScriptCtx<S>) -> Self {
-        match (self, rhs) {
+    pub fn sub<S>(self, rhs: Self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        Ok(match (self, rhs) {
             (Self::Integer(l), Self::Integer(r)) => Self::Integer(l - r),
-            (l, r) => Self::Number(l.to_num(ctx) - r.to_num(ctx)),
-        }
+            (l, r) => Self::Number(l.to_num(ctx)? - r.to_num(ctx)?),
+        })
     }
 
-    pub fn neg<S>(self, ctx: &VimScriptCtx<S>) -> Self {
-        match self {
+    pub fn neg<S>(self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        Ok(match self {
             Self::Integer(r) => Self::Integer(-r),
-            r => Self::Number(-r.to_num(ctx)),
-        }
+            r => Self::Number(-r.to_num(ctx)?),
+        })
     }
 
-    pub fn abs<S>(self, ctx: &VimScriptCtx<S>) -> Self {
-        match self {
+    pub fn abs<S>(self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        Ok(match self {
             Self::Integer(r) => Self::Integer(r.abs()),
-            r => Self::Number(r.to_num(ctx).abs()),
-        }
+            r => Self::Number(r.to_num(ctx)?.abs()),
+        })
     }
 
-    pub fn not<S: State + 'static>(self, ctx: &VimScriptCtx<S>) -> Self {
-        Self::Bool(!self.to_bool(ctx))
+    pub fn not<S: State + 'static>(self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        Ok(Self::Bool(!self.to_bool(ctx)?))
     }
 
-    pub fn mul<S>(self, rhs: Self, ctx: &VimScriptCtx<S>) -> Self {
-        match (self, rhs) {
+    pub fn mul<S>(self, rhs: Self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        Ok(match (self, rhs) {
             (Self::Integer(l), Self::Integer(r)) => Self::Integer(l * r),
-            (l, r) => Self::Number(l.to_num(ctx) * r.to_num(ctx)),
-        }
+            (l, r) => Self::Number(l.to_num(ctx)? * r.to_num(ctx)?),
+        })
     }
 
-    pub fn div<S>(self, rhs: Self, ctx: &VimScriptCtx<S>) -> Self {
-        match (self, rhs) {
+    pub fn div<S>(self, rhs: Self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        Ok(match (self, rhs) {
             (Self::Integer(l), Self::Integer(r)) => Self::Integer(l / r),
-            (l, r) => Self::Number(l.to_num(ctx) / r.to_num(ctx)),
-        }
+            (l, r) => Self::Number(l.to_num(ctx)? / r.to_num(ctx)?),
+        })
     }
 
-    pub fn concat<S>(self, rhs: Self, _ctx: &VimScriptCtx<S>) -> Self {
-        Self::Str(format!("{}{}", self, rhs))
+    pub fn concat<S>(self, rhs: Self, _ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        Ok(Self::Str(format!("{}{}", self, rhs)))
     }
 
-    pub fn less<S>(self, rhs: Self, _ctx: &VimScriptCtx<S>) -> Self {
-        match (self, rhs) {
+    pub fn less<S>(self, rhs: Self, _ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        Ok(match (self, rhs) {
             (Self::Integer(l), Self::Integer(r)) => Self::Bool(l < r),
             (Self::Number(l), Self::Number(r)) => Self::Bool(l < r),
             (Self::Str(l), Self::Str(r)) => Self::Bool(l < r),
             _ => Self::Bool(false),
-        }
+        })
     }
 
-    pub fn equal<S>(self, rhs: Self, _ctx: &VimScriptCtx<S>) -> Self {
-        Self::Bool(self == rhs)
+    pub fn equal<S>(self, rhs: Self, _ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        Ok(Self::Bool(self == rhs))
     }
 
-    pub fn index<S>(&self, idx: &Self, ctx: &VimScriptCtx<S>) -> Self {
-        match self {
+    pub fn index<S>(&self, idx: &Self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        Ok(match self {
             Self::List(l) => {
-                let idx = idx.to_int(ctx);
+                let idx = idx.to_int(ctx)?;
                 if idx < 0 {
                     l.iter()
                         .rev()
@@ -421,7 +434,7 @@ impl Value {
                 }
             }
             Self::Str(s) => {
-                let idx = idx.to_int(ctx);
+                let idx = idx.to_int(ctx)?;
                 if idx < 0 {
                     s.chars()
                         .rev()
@@ -437,26 +450,33 @@ impl Value {
             }
             Self::Object(m) => m.get(&idx.to_string(ctx)).unwrap_or(&Self::Nil).clone(),
             _ => todo!(),
+        })
+    }
+
+    pub fn list_len(&self) -> Result<Self, VimError> {
+        match self {
+            Self::List(l) => Ok(Self::Integer(l.len() as isize)),
+            _ => Err(VimError::ExpectedType(VimType::Object)),
         }
     }
 
-    pub fn list_len(&self) -> Self {
+    pub fn list_empty(&self) -> Result<Self, VimError> {
         match self {
-            Self::List(l) => Self::Integer(l.len() as isize),
-            _ => Self::Nil,
+            Self::List(l) => Ok(Self::Bool(l.is_empty())),
+            _ => Err(VimError::ExpectedType(VimType::Object)),
         }
     }
 
-    pub fn list_empty(&self) -> Self {
+    pub fn starts_with<'a, P: Pattern<'a>>(&'a self, pat: P) -> bool {
         match self {
-            Self::List(l) => Self::Bool(l.is_empty()),
-            _ => Self::Nil,
+            Self::Str(s) => s.starts_with(pat),
+            _ => false,
         }
     }
 }
 
-impl PartialEq<&str> for Value {
-    fn eq(&self, other: &&str) -> bool {
+impl PartialEq<str> for Value {
+    fn eq(&self, other: &str) -> bool {
         match self {
             Self::Str(s) => s == other,
             _ => false,
@@ -567,14 +587,14 @@ impl<'a> Names<'a> {
     pub fn iter(
         &self,
         v: Value,
-        mut f: impl FnMut(&'a str, Value) -> Result<(), VimError>,
+        f: &mut impl FnMut(&'a str, Value) -> Result<(), VimError>,
     ) -> Result<(), VimError> {
         match self {
             Self::Single(name) => f(name, v),
             Self::List(names) => {
                 if let Value::List(vals) = v {
                     for (name, val) in names.iter().zip(vals.into_iter()) {
-                        name.iter(val, &mut f)?;
+                        name.iter(val, f)?;
                     }
                     Ok(())
                 } else {
@@ -584,7 +604,7 @@ impl<'a> Names<'a> {
             Self::Object(names) => {
                 if let Value::Object(mut vals) = v {
                     for (idx, name) in names.iter() {
-                        name.iter(vals.remove(*idx).unwrap_or(Value::Nil), &mut f)?;
+                        name.iter(vals.remove(*idx).unwrap_or(Value::Nil), f)?;
                     }
                     Ok(())
                 } else {

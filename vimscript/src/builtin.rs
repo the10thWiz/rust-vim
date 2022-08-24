@@ -28,12 +28,18 @@ impl<S, F: Fn(Vec<Value>, &mut VimScriptCtx<S>) -> Result<Value, VimError>> Buil
     }
 }
 
+impl<E> Into<Result<Value, E>> for Value {
+    fn into(self) -> Result<Value, E> {
+        Ok(self)
+    }
+}
+
 macro_rules! nargs {
     (|$ctx:ident $(,$param:ident)*| $expr:expr) => {
-        Function::Builtin(Arc::new(Builtin(|v: Vec<Value>, $ctx: &mut _| {
+        Function::Builtin(Arc::new(Builtin(|v: Vec<Value>, $ctx: &mut _| -> Result<Value, VimError> {
             let tmp: Result<&[Value; nargs!(@COUNT $($param)*)], _> = v.as_slice().try_into();
             if let Ok([$($param,)*]) = tmp {
-                Ok($expr)
+                $expr.into()
             } else {
                 Err(VimError::WrongArgCount(nargs!(@COUNT $($param)*)))
             }
@@ -66,9 +72,9 @@ macro_rules! nargs {
 
 impl<S: State> VimScriptCtx<S> {
     pub fn builtin_functions(&mut self) {
-        self.functions.insert_builtin("nr2char", nargs!(|ctx, a| Value::Integer(a.to_string(ctx).chars().next().map_or(0, |c| c as isize))));
 // 	nr2char()		get a character by its number value
 // 	list2str()		get a character string from a list of numbers
+        self.functions.insert_builtin("char2nr", nargs!(|ctx, a| Value::Integer(a.to_string(ctx).chars().next().map_or(0, |c| c as isize))));
 // 	char2nr()		get number value of a character
 // 	str2list()		get list of numbers from a string
 // 	str2nr()		convert a string to a Number
@@ -106,7 +112,7 @@ impl<S: State> VimScriptCtx<S> {
 // 	byteidx()		byte index of a character in a string
 // 	byteidxcomp()		like byteidx() but count composing characters
 // 	charidx()		character index of a byte in a string
-        self.functions.insert_builtin("repeat", nargs!(|ctx, a, b| Value::Str(a.to_string(ctx).repeat(b.to_int(ctx) as usize))));
+        self.functions.insert_builtin("repeat", nargs!(|ctx, a, b| Value::Str(a.to_string(ctx).repeat(b.to_int(ctx)? as usize))));
 // 	repeat()		repeat a string multiple times
         self.functions.insert_builtin("eval", Function::Builtin(Arc::new(Eval)));
 // 	eval()			evaluate a string expression
@@ -166,58 +172,58 @@ impl<S: State> VimScriptCtx<S> {
 // 	count()			count number of times a value appears
 //
 // Floating point computation:				*float-functions*
-        self.functions.insert_builtin("float2nr", nargs!(|ctx, a| Value::Integer(a.to_int(ctx))));
+        self.functions.insert_builtin("float2nr", nargs!(|ctx, a| Value::Integer(a.to_int(ctx)?)));
 // 	float2nr()		convert Float to Number
-        self.functions.insert_builtin("abs", nargs!(|ctx, a| Value::Number(a.to_num(ctx).abs())));
+        self.functions.insert_builtin("abs", nargs!(|ctx, a| Value::Number(a.to_num(ctx)?.abs())));
 // 	abs()			absolute value (also works for Number)
-        self.functions.insert_builtin("round", nargs!(|ctx, a| Value::Number(a.to_num(ctx).round())));
+        self.functions.insert_builtin("round", nargs!(|ctx, a| Value::Number(a.to_num(ctx)?.round())));
 // 	round()			round off
-        self.functions.insert_builtin("ceil", nargs!(|ctx, a| Value::Number(a.to_num(ctx).ceil())));
+        self.functions.insert_builtin("ceil", nargs!(|ctx, a| Value::Number(a.to_num(ctx)?.ceil())));
 // 	ceil()			round up
-        self.functions.insert_builtin("floor", nargs!(|ctx, a| Value::Number(a.to_num(ctx).floor())));
+        self.functions.insert_builtin("floor", nargs!(|ctx, a| Value::Number(a.to_num(ctx)?.floor())));
 // 	floor()			round down
-        self.functions.insert_builtin("trunc", nargs!(|ctx, a| Value::Number(a.to_num(ctx).trunc())));
+        self.functions.insert_builtin("trunc", nargs!(|ctx, a| Value::Number(a.to_num(ctx)?.trunc())));
 // 	trunc()			remove value after decimal point
 // 	fmod()			remainder of division
-        self.functions.insert_builtin("exp", nargs!(|ctx, a| Value::Number(a.to_num(ctx).exp())));
+        self.functions.insert_builtin("exp", nargs!(|ctx, a| Value::Number(a.to_num(ctx)?.exp())));
 // 	exp()			exponential
-        self.functions.insert_builtin("log", nargs!(|ctx, a| Value::Number(a.to_num(ctx).log(std::f64::consts::E))));
+        self.functions.insert_builtin("log", nargs!(|ctx, a| Value::Number(a.to_num(ctx)?.log(std::f64::consts::E))));
 // 	log()			natural logarithm (logarithm to base e)
-        self.functions.insert_builtin("log10", nargs!(|ctx, a| Value::Number(a.to_num(ctx).log10())));
+        self.functions.insert_builtin("log10", nargs!(|ctx, a| Value::Number(a.to_num(ctx)?.log10())));
 // 	log10()			logarithm to base 10
-        self.functions.insert_builtin("pow", nargs!(|ctx, a, b| Value::Number(a.to_num(ctx).powf(b.to_num(ctx)))));
+        self.functions.insert_builtin("pow", nargs!(|ctx, a, b| Value::Number(a.to_num(ctx)?.powf(b.to_num(ctx)?))));
 // 	pow()			value of x to the exponent y
-        self.functions.insert_builtin("sqrt", nargs!(|ctx, a| Value::Number(a.to_num(ctx).sqrt())));
+        self.functions.insert_builtin("sqrt", nargs!(|ctx, a| Value::Number(a.to_num(ctx)?.sqrt())));
 // 	sqrt()			square root
-        self.functions.insert_builtin("sin", nargs!(|ctx, a| Value::Number(a.to_num(ctx).sin())));
+        self.functions.insert_builtin("sin", nargs!(|ctx, a| Value::Number(a.to_num(ctx)?.sin())));
 // 	sin()			sine
-        self.functions.insert_builtin("cos", nargs!(|ctx, a| Value::Number(a.to_num(ctx).cos())));
+        self.functions.insert_builtin("cos", nargs!(|ctx, a| Value::Number(a.to_num(ctx)?.cos())));
 // 	cos()			cosine
-        self.functions.insert_builtin("tan", nargs!(|ctx, a| Value::Number(a.to_num(ctx).tan())));
+        self.functions.insert_builtin("tan", nargs!(|ctx, a| Value::Number(a.to_num(ctx)?.tan())));
 // 	tan()			tangent
-        self.functions.insert_builtin("asin", nargs!(|ctx, a| Value::Number(a.to_num(ctx).asin())));
+        self.functions.insert_builtin("asin", nargs!(|ctx, a| Value::Number(a.to_num(ctx)?.asin())));
 // 	asin()			arc sine
-        self.functions.insert_builtin("acos", nargs!(|ctx, a| Value::Number(a.to_num(ctx).acos())));
+        self.functions.insert_builtin("acos", nargs!(|ctx, a| Value::Number(a.to_num(ctx)?.acos())));
 // 	acos()			arc cosine
-        self.functions.insert_builtin("atan", nargs!(|ctx, a| Value::Number(a.to_num(ctx).atan())));
+        self.functions.insert_builtin("atan", nargs!(|ctx, a| Value::Number(a.to_num(ctx)?.atan())));
 // 	atan()			arc tangent
-        self.functions.insert_builtin("atan2", nargs!(|ctx, a, b| Value::Number(a.to_num(ctx).atan2(b.to_num(ctx)))));
+        self.functions.insert_builtin("atan2", nargs!(|ctx, a, b| Value::Number(a.to_num(ctx)?.atan2(b.to_num(ctx)?))));
 // 	atan2()			arc tangent
-        self.functions.insert_builtin("sinh", nargs!(|ctx, a| Value::Number(a.to_num(ctx).sinh())));
+        self.functions.insert_builtin("sinh", nargs!(|ctx, a| Value::Number(a.to_num(ctx)?.sinh())));
 // 	sinh()			hyperbolic sine
-        self.functions.insert_builtin("cosh", nargs!(|ctx, a| Value::Number(a.to_num(ctx).cosh())));
+        self.functions.insert_builtin("cosh", nargs!(|ctx, a| Value::Number(a.to_num(ctx)?.cosh())));
 // 	cosh()			hyperbolic cosine
-        self.functions.insert_builtin("tanh", nargs!(|ctx, a| Value::Number(a.to_num(ctx).tanh())));
+        self.functions.insert_builtin("tanh", nargs!(|ctx, a| Value::Number(a.to_num(ctx)?.tanh())));
 // 	tanh()			hyperbolic tangent
 //
 // Other computation:					*bitwise-function*
-        self.functions.insert_builtin("and", nargs!(|ctx, a, b| Value::Integer(a.to_int(ctx) & b.to_int(ctx))));
+        self.functions.insert_builtin("and", nargs!(|ctx, a, b| Value::Integer(a.to_int(ctx)? & b.to_int(ctx)?)));
 // 	and()			bitwise AND
-        self.functions.insert_builtin("invert", nargs!(|ctx, a| Value::Integer(!a.to_int(ctx))));
+        self.functions.insert_builtin("invert", nargs!(|ctx, a| Value::Integer(!a.to_int(ctx)?)));
 // 	invert()		bitwise invert
-        self.functions.insert_builtin("or", nargs!(|ctx, a, b| Value::Integer(a.to_int(ctx) | b.to_int(ctx))));
+        self.functions.insert_builtin("or", nargs!(|ctx, a, b| Value::Integer(a.to_int(ctx)? | b.to_int(ctx)?)));
 // 	or()			bitwise OR
-        self.functions.insert_builtin("xor", nargs!(|ctx, a, b| Value::Integer(a.to_int(ctx) ^ b.to_int(ctx))));
+        self.functions.insert_builtin("xor", nargs!(|ctx, a, b| Value::Integer(a.to_int(ctx)? ^ b.to_int(ctx)?)));
 // 	xor()			bitwise XOR
 // 	sha256()		SHA-256 hash
 //
@@ -238,9 +244,9 @@ impl<S: State> VimScriptCtx<S> {
 // 	assert_inrange()	assert that an expression is inside a range
 // 	assert_match()		assert that a pattern matches the value
 // 	assert_notmatch()	assert that a pattern does not match the value
-        self.functions.insert_builtin("assert_false", nargs!(assert |ctx, a| !a.to_bool(ctx)));
+        self.functions.insert_builtin("assert_false", nargs!(assert |ctx, a| !a.to_bool(ctx)?));
 // 	assert_false()		assert that an expression is false
-        self.functions.insert_builtin("assert_true", nargs!(assert |ctx, a| a.to_bool(ctx)));
+        self.functions.insert_builtin("assert_true", nargs!(assert |ctx, a| a.to_bool(ctx)?));
 // 	assert_true()		assert that an expression is true
 // 	assert_exception()	assert that a command throws an exception
 // 	assert_beeps()		assert that a command beeps

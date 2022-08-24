@@ -24,7 +24,7 @@ macro_rules! nargs {
         Arc::new(Builtin(|v: Vec<Value>, $ctx: &mut VimScriptCtx<VimInner>, $state: &mut VimInner| {
             let tmp: Result<&[Value; nargs!(@COUNT $($param)*)], _> = v.as_slice().try_into();
             if let Ok([$($param,)*]) = tmp {
-                Ok($expr)
+                $expr.into()
             } else {
                 Err(VimError::WrongArgCount(nargs!(@COUNT $($param)*)))
             }
@@ -46,17 +46,17 @@ pub fn builtin_functions(ctx: &mut VimScriptCtx<VimInner>) {
     ctx.builtin(
         "col",
         nargs!(|ctx, state, a| if a == "." {
-            Value::Integer(state.get_focus().cursor().x + 1)
+            Value::Integer(state.get_focus().cursor().col() as isize + 1)
         } else if a == "$" {
             let win = state.get_focus();
-            Value::Integer(win.buffer().read().get_line(win.cursor().y).unwrap().len() as isize + 1)
+            Value::Integer(win.buffer().read().get_line(win.cursor().row()).unwrap().len() as isize + 1)
         } else if a.starts_with('\'') {
             todo!("Marks")
         } else if a == "v" {
             // TODO: visual selection
-            Value::Integer(state.get_focus().cursor().x + 1)
+            Value::Integer(state.get_focus().cursor().col() as isize + 1)
         } else {
-            Value::Integer(state.get_focus().cursor().x + 1)
+            Value::Nil
         }),
     );
     // 	col()			column number of the cursor or a mark
@@ -64,16 +64,16 @@ pub fn builtin_functions(ctx: &mut VimScriptCtx<VimInner>) {
     ctx.builtin(
         "line",
         nargs!(|ctx, state, a| if a == "." {
-            Value::Integer(state.get_focus().cursor().y + 1)
+            Value::Integer(state.get_focus().cursor().row() as isize + 1)
         } else if a == "$" {
-            Value::Integer(state.get_focus().buffer().read().len())
+            Value::Integer(state.get_focus().buffer().read().len() as isize)
         } else if a.starts_with('\'') {
             todo!("Marks")
         } else if a == "v" {
             // TODO: visual selection
-            Value::Integer(state.get_focus().cursor().y + 1)
+            Value::Integer(state.get_focus().cursor().row() as isize + 1)
         } else {
-            Value::Integer(state.get_focus().cursor().y + 1)
+            Value::Integer(state.get_focus().cursor().row() as isize + 1)
         }),
     );
     // 	line()			line number of the cursor or mark
