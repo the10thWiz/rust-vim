@@ -2,22 +2,26 @@
 
 mod args;
 mod buffer;
+mod builtin;
 mod cli;
 mod cursor;
 mod keymap;
+mod options;
 mod util;
 mod window;
-mod options;
-mod builtin;
 
 use crate::buffer::BufferSelect;
 use std::{
-    io::{Stdout, StdoutLock, Write, Read, self, ErrorKind},
-    time::Duration, path::{PathBuf, Path}, fs::File, borrow::Cow, fmt::Display,
+    borrow::Cow,
+    fmt::Display,
+    fs::File,
+    io::{self, ErrorKind, Read, Stdout, StdoutLock, Write},
+    path::{Path, PathBuf},
+    time::Duration, panic::Location,
 };
 
 use args::Args;
-use backtrace::{Backtrace, BacktraceFmt, BytesOrWideString};
+use backtrace::{Backtrace, BacktraceFmt, BacktraceFrame, BacktraceSymbol, BytesOrWideString};
 use buffer::BufferRef;
 use clap::Parser;
 use cli::{Cli, CliState};
@@ -36,9 +40,9 @@ use crossterm::{
 use cursor::Cursor;
 use keymap::{Action, KeyState, MapAction, MapSet};
 use log::{error, info};
-use options::{Opts, Options};
+use options::{Options, Opts};
 use util::{Area, Pos};
-use vimscript::{Id, IdProcuder, State, VimScriptCtx, VimError, Value};
+use vimscript::{Id, IdProcuder, State, Value, VimError, VimScriptCtx};
 use window::{Scroll, WinMode, Window};
 
 pub use crossterm::Result;
@@ -523,7 +527,9 @@ impl VimInner {
             let mut ret = String::new();
             while let Some((prefix, rem)) = var.split_once('$') {
                 ret += prefix;
-                let end = rem.find(|c: char| !c.is_alphanumeric()).unwrap_or(rem.len());
+                let end = rem
+                    .find(|c: char| !c.is_alphanumeric())
+                    .unwrap_or(rem.len());
                 if let Ok(val) = std::env::var(&rem[..end]) {
                     ret += &val;
                 } else if &rem[..end] == "XDG_CONFIG_HOME" {
@@ -542,7 +548,10 @@ impl VimInner {
         }
     }
 
-    pub fn find_on_rtp(&self, name: impl AsRef<str>) -> std::result::Result<(String, File), io::Error> {
+    pub fn find_on_rtp(
+        &self,
+        name: impl AsRef<str>,
+    ) -> std::result::Result<(String, File), io::Error> {
         let name = name.as_ref();
         for path in self.options.runtimepath.split(',') {
             let name = self.shell_expand(format!("{path}/{name}"));
@@ -550,7 +559,10 @@ impl VimInner {
                 return Ok((name.into_owned(), f));
             }
         }
-        Err(io::Error::new(ErrorKind::NotFound, "File was not found on 'runtimepath'"))
+        Err(io::Error::new(
+            ErrorKind::NotFound,
+            "File was not found on 'runtimepath'",
+        ))
     }
 
     fn init(&mut self, ctx: &mut VimScriptCtx<Self>) {
@@ -790,6 +802,7 @@ impl<W: Lockable> Curse<W> {
     }
 
     fn draw(&mut self) -> Result<()> {
+        panic!();
         let mut lock = self.terminal.lock();
         self.vim.draw(&mut lock)?;
         lock.flush()?;
@@ -819,8 +832,42 @@ fn panic_cleanup(info: &std::panic::PanicInfo) {
             loc.line(),
             loc.column()
         );
+        error!("Full backtrace:\n{}", Trimmed(loc, Backtrace::new()));
     } else {
         error!("A Panic occured somewhere");
+        error!("Full backtrace:\n{:?}", Backtrace::new());
     }
-    error!("Full backtrace:\n{:?}", Backtrace::new());
+}
+
+struct Trimmed<'a>(&'a Location<'a>, Backtrace);
+
+fn symbol_starts_with(frame: &BacktraceFrame, pat: &str) -> bool {
+    frame.symbols().iter().any(|s| {
+        s.name()
+            .map(|n| format!("{n}").starts_with(pat))
+            .unwrap_or(true)
+    })
+}
+
+fn is(location: &Location, symbol: &BacktraceSymbol) -> bool {
+    location.file() == format!("{}", symbol.filename().unwrap().display())
+        && location.line() == symbol.lineno().unwrap_or(0)
+        && location.col() == symbol.colno().unwrap_or(0)
+}
+
+impl Display for Trimmed<'_> {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut path_formatter =
+            |f: &mut std::fmt::Formatter<'_>, s: BytesOrWideString<'_>| s.fmt(f);
+        let mut f = BacktraceFmt::new(fmt, backtrace::PrintFmt::Short, &mut path_formatter);
+        f.add_context();
+        self.1
+            .frames()
+            .iter()
+            .skip_while(|f| !f.symbols().iter().any(|symbol: &BacktraceSymbol| is(self.0, symbol)))
+            .take_while(|f| !symbol_starts_with(f, "std::rt::lang_start"))
+            .map(|frame| f.frame().backtrace_frame(frame))
+            .collect::<std::fmt::Result>()?;
+        f.finish()
+    }
 }
