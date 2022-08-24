@@ -802,7 +802,6 @@ impl<W: Lockable> Curse<W> {
     }
 
     fn draw(&mut self) -> Result<()> {
-        panic!();
         let mut lock = self.terminal.lock();
         self.vim.draw(&mut lock)?;
         lock.flush()?;
@@ -852,7 +851,7 @@ fn symbol_starts_with(frame: &BacktraceFrame, pat: &str) -> bool {
 fn is(location: &Location, symbol: &BacktraceSymbol) -> bool {
     location.file() == format!("{}", symbol.filename().unwrap().display())
         && location.line() == symbol.lineno().unwrap_or(0)
-        && location.col() == symbol.colno().unwrap_or(0)
+        && location.column() == symbol.colno().unwrap_or(0)
 }
 
 impl Display for Trimmed<'_> {
