@@ -1,4 +1,4 @@
-#![feature(iter_intersperse, pattern)]
+#![feature(iter_intersperse, pattern, ptr_to_from_bits)]
 
 pub mod builtin;
 mod expr;
@@ -73,6 +73,9 @@ pub enum VimError {
     ExpectedType(VimType),
     #[error("Not a boolean value")]
     NotABool,
+
+    #[error("Illegal Argument: {0}")]
+    IllegalArgument(&'static str)
 }
 
 impl From<Infallible> for VimError {
@@ -223,6 +226,7 @@ impl<S: State + 'static> VimScriptCtx<S> {
         ret.variables.insert_builtin("v:true", Value::Bool(true));
         ret.variables.insert_builtin("v:false", Value::Bool(false));
         ret.variables.insert_builtin("v:null", Value::Nil);
+        VimType::ty_names(&mut ret.variables);
         ret.builtin_functions();
         ret.builtin_commands();
         ret
@@ -465,7 +469,7 @@ impl<S: State + 'static> VimScriptCtx<S> {
         args: Vec<Value>,
         state: &mut S,
     ) -> Result<Value, VimError> {
-        match self.get_func(f) {
+        match self.get_func(None, f) {
             Some(Function::VimScript(f)) => {
                 let f = Arc::clone(f);
                 self.variables.enter_local();
@@ -482,7 +486,7 @@ impl<S: State + 'static> VimScriptCtx<S> {
         expr::parse(expr.trim(), self, state)
     }
 
-    fn get_func(&self, name: impl AsRef<str>) -> Option<&Function<S>> {
+    fn get_func(&self, id: Option<Id>, name: impl AsRef<str>) -> Option<&Function<S>> {
         self.functions.get(name).ok().flatten()
     }
 

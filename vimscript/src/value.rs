@@ -5,7 +5,9 @@
 //
 
 use crate::expr::ValueError;
+use crate::namespace::IdDisplay;
 use crate::BuiltinFunction;
+use crate::Id;
 use crate::LineOwned;
 use crate::RunTy;
 use crate::Section;
@@ -13,13 +15,17 @@ use crate::State;
 use crate::Tokenizer;
 use crate::VimError;
 use crate::VimScriptCtx;
+use crate::namespace::NameSpaced;
 use std::borrow::Cow;
 use std::collections::hash_map;
 use std::collections::linked_list;
 use std::collections::{HashMap, LinkedList};
 use std::fmt::Display;
+use std::ops::Deref;
 use std::str::pattern::Pattern;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::vec;
 
 #[derive(Debug)]
 pub struct VimFunction {
@@ -59,15 +65,15 @@ pub enum Function<S> {
     Builtin(Arc<dyn BuiltinFunction<S>>),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum ValueRef<'a> {
     Integer(isize),
     Number(f64),
     Str(Cow<'a, str>),
     Bool(bool),
-    Object(&'a HashMap<String, Value>),
-    List(&'a LinkedList<Value>),
-    Function(Cow<'a, str>),
+    Object(Arc<Mutex<HashMap<String, Value>>>),
+    List(Arc<Mutex<Vec<Value>>>),
+    Function(Option<Id>, Cow<'a, str>),
     Nil,
 }
 
@@ -111,7 +117,7 @@ impl Display for ValueRef<'_> {
             Self::Bool(b) => write!(f, "{}", b),
             Self::Object(_) => write!(f, "{{ -- }}"),
             Self::List(_) => write!(f, "[ -- ]"),
-            Self::Function(name) => write!(f, "<Function@{}>", name),
+            Self::Function(id, name) => write!(f, "<Function@{}{}>", IdDisplay(*id), name),
             Self::Nil => write!(f, "v:null"),
         }
     }
@@ -126,7 +132,7 @@ impl From<ValueRef<'_>> for Value {
             ValueRef::Bool(v) => Self::Bool(v),
             ValueRef::Object(v) => Self::Object(v.clone()),
             ValueRef::List(v) => Self::List(v.clone()),
-            ValueRef::Function(v) => Self::Function(v.to_string()),
+            ValueRef::Function(id, v) => Self::Function(id, v.to_string()),
             ValueRef::Nil => Self::Nil,
         }
     }
@@ -142,18 +148,67 @@ pub enum VimType {
     List,
     Function,
     Nil,
+    Blob,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+impl VimType {
+    pub fn as_int(&self) -> isize {
+        match self {
+            VimType::Integer => 0,
+            VimType::Str => 1,
+            VimType::Function => 2,
+            VimType::List => 3,
+            VimType::Object => 4,
+            VimType::Number => 5,
+            VimType::Bool => 6,
+            VimType::Nil => 7,
+            VimType::Blob => 10,
+        }
+    }
+
+    pub fn ty_names(ctx: &mut NameSpaced<Value>) {
+        ctx.insert_builtin("v:t_number", Value::Integer(Self::Integer.as_int()));
+        ctx.insert_builtin("v:t_string", Value::Integer(Self::Str.as_int()));
+        ctx.insert_builtin("v:t_func", Value::Integer(Self::Function.as_int()));
+        ctx.insert_builtin("v:t_list", Value::Integer(Self::List.as_int()));
+        ctx.insert_builtin("v:t_dict", Value::Integer(Self::Object.as_int()));
+        ctx.insert_builtin("v:t_float", Value::Integer(Self::Number.as_int()));
+        ctx.insert_builtin("v:t_bool", Value::Integer(Self::Bool.as_int()));
+        ctx.insert_builtin("v:t_null", Value::Integer(Self::Nil.as_int()));
+        ctx.insert_builtin("v:t_blob", Value::Integer(Self::Blob.as_int()));
+    }
+}
+
+#[derive(Debug, Clone)]
 pub enum Value {
     Integer(isize),
     Number(f64),
     Str(String),
     Bool(bool),
-    Object(HashMap<String, Value>),
-    List(LinkedList<Value>),
-    Function(String),
+    Object(Arc<Mutex<HashMap<String, Value>>>),
+    List(Arc<Mutex<Vec<Value>>>),
+    Function(Option<Id>, String),
     Nil,
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Value::Integer(l), Value::Integer(r)) => l == r,
+            (Value::Number(l), Value::Number(r)) => l == r,
+            (Value::Str(l), Value::Str(r)) => l == r,
+            (Value::Bool(l), Value::Bool(r)) => l == r,
+            (Value::Object(l), Value::Object(r)) => {
+                l.lock().unwrap().deref() == r.lock().unwrap().deref()
+            }
+            (Value::List(l), Value::List(r)) => {
+                l.lock().unwrap().deref() == r.lock().unwrap().deref()
+            }
+            (Value::Function(li, l), Value::Function(ri, r)) => l == r && li == ri,
+            (Value::Nil, Value::Nil) => true,
+            _ => false,
+        }
+    }
 }
 
 impl From<isize> for Value {
@@ -199,7 +254,9 @@ impl Value {
     }
 
     pub fn list<S: Into<Value>>(l: impl IntoIterator<Item = S>) -> Self {
-        Self::List(l.into_iter().map(|s| s.into()).collect())
+        Self::List(Arc::new(Mutex::new(
+            l.into_iter().map(|s| s.into()).collect(),
+        )))
     }
 
     pub const TRUE: Self = Value::Bool(true);
@@ -218,6 +275,7 @@ impl Value {
             todo!("Invalid string `{}`", s)
         }
     }
+
     pub fn parse_num(s: impl AsRef<str>) -> Result<Self, VimError> {
         let s = s.as_ref();
         if let Ok(i) = s.parse() {
@@ -237,15 +295,42 @@ impl Value {
         }
     }
 
+    pub fn nil_or<R: Into<Result<Self, VimError>>>(self, f: impl Fn() -> R) -> Result<Self, VimError> {
+        match self {
+            Self::Nil => f().into(),
+            v => Ok(v),
+        }
+    }
+
+    pub fn is_nil(&self) -> bool {
+        match self {
+            Self::Nil => true,
+            _ => false,
+        }
+    }
+
+    pub fn ty(&self) -> VimType {
+        match self {
+            Value::Integer(_) => VimType::Integer,
+            Value::Number(_) => VimType::Number,
+            Value::Str(_) => VimType::Str,
+            Value::Bool(_) => VimType::Bool,
+            Value::Object(_) => VimType::Object,
+            Value::List(_) => VimType::List,
+            Value::Function(_, _) => VimType::Function,
+            Value::Nil => VimType::Nil,
+        }
+    }
+
     pub fn to_bool<S: State + 'static>(&self, ctx: &VimScriptCtx<S>) -> Result<bool, VimError> {
         Ok(match self {
             Value::Integer(i) => *i != 0,
             Value::Number(n) => *n != 0.,
             Value::Str(s) => !s.is_empty(),
             Value::Bool(b) => *b,
-            Value::Object(o) => !o.is_empty(),
-            Value::List(l) => !l.is_empty(),
-            Value::Function(f) => ctx.get_func(f).is_some(),
+            Value::Object(o) => !o.lock().unwrap().is_empty(),
+            Value::List(l) => !l.lock().unwrap().is_empty(),
+            Value::Function(id, f) => ctx.get_func(*id, f).is_some(),
             Value::Nil => false,
         })
     }
@@ -258,7 +343,9 @@ impl Value {
             Value::Bool(b) => format!("{b}"),
             Value::Object(o) => std::iter::once("{".to_string())
                 .chain(
-                    o.iter()
+                    o.lock()
+                        .unwrap()
+                        .iter()
                         .flat_map(|(n, v)| {
                             [n.clone(), ":".to_string(), v.to_string(ctx)].into_iter()
                         })
@@ -268,13 +355,15 @@ impl Value {
                 .collect(),
             Value::List(l) => std::iter::once("[".to_string())
                 .chain(
-                    l.iter()
+                    l.lock()
+                        .unwrap()
+                        .iter()
                         .map(|v| v.to_string(ctx))
                         .intersperse(",".to_string()),
                 )
                 .chain(std::iter::once("]".to_string()))
                 .collect(),
-            Value::Function(f) => f.clone(),
+            Value::Function(_id, f) => f.clone(),
             Value::Nil => "v:null".to_string(),
         }
     }
@@ -293,7 +382,7 @@ impl Value {
             }
             Value::Object(_o) => todo!(),
             Value::List(_l) => todo!(),
-            Value::Function(_f) => todo!(),
+            Value::Function(_id, _f) => todo!(),
             Value::Nil => Ok(0),
         }
     }
@@ -312,7 +401,7 @@ impl Value {
             }
             Value::Object(_o) => todo!(),
             Value::List(_l) => todo!(),
-            Value::Function(_f) => todo!(),
+            Value::Function(_id, _f) => todo!(),
             Value::Nil => Ok(0.),
         }
     }
@@ -332,26 +421,26 @@ impl Value {
         }
     }
 
-    pub fn get_obj<S>(&self, _ctx: &VimScriptCtx<S>) -> Option<&HashMap<String, Value>> {
-        match self {
-            Value::Object(o) => Some(o),
-            _ => None,
-        }
-    }
-
-    pub fn get_list<S>(&self, _ctx: &VimScriptCtx<S>) -> Option<&LinkedList<Value>> {
-        match self {
-            Value::List(o) => Some(o),
-            _ => None,
-        }
-    }
+    // pub fn get_obj<S>(&self, _ctx: &VimScriptCtx<S>) -> Option<&HashMap<String, Value>> {
+    //     match self {
+    //         Value::Object(o) => Some(o),
+    //         _ => None,
+    //     }
+    // }
+    //
+    // pub fn get_list<S>(&self, _ctx: &VimScriptCtx<S>) -> Option<&LinkedList<Value>> {
+    //     match self {
+    //         Value::List(o) => Some(o),
+    //         _ => None,
+    //     }
+    // }
 
     pub fn get_func<'a, S: State + 'static>(
         &self,
         ctx: &'a VimScriptCtx<S>,
     ) -> Option<&'a Function<S>> {
         match self {
-            Value::Function(f) => ctx.get_func(f),
+            Value::Function(id, f) => ctx.get_func(*id, f),
             _ => None,
         }
     }
@@ -424,13 +513,20 @@ impl Value {
             Self::List(l) => {
                 let idx = idx.to_int(ctx)?;
                 if idx < 0 {
-                    l.iter()
+                    l.lock()
+                        .unwrap()
+                        .iter()
                         .rev()
                         .nth((1 - idx) as usize)
                         .unwrap_or(&Self::Nil)
                         .clone()
                 } else {
-                    l.iter().nth(idx as usize).unwrap_or(&Self::Nil).clone()
+                    l.lock()
+                        .unwrap()
+                        .iter()
+                        .nth(idx as usize)
+                        .unwrap_or(&Self::Nil)
+                        .clone()
                 }
             }
             Self::Str(s) => {
@@ -448,22 +544,137 @@ impl Value {
                         .unwrap_or(Self::Nil)
                 }
             }
-            Self::Object(m) => m.get(&idx.to_string(ctx)).unwrap_or(&Self::Nil).clone(),
+            Self::Object(m) => m
+                .lock()
+                .unwrap()
+                .get(&idx.to_string(ctx))
+                .unwrap_or(&Self::Nil)
+                .clone(),
             _ => todo!(),
         })
     }
 
-    pub fn list_len(&self) -> Result<Self, VimError> {
+    pub fn len(&self) -> Result<Self, VimError> {
         match self {
-            Self::List(l) => Ok(Self::Integer(l.len() as isize)),
+            Self::List(l) => Ok(Self::Integer(l.lock().unwrap().len() as isize)),
+            Self::Object(l) => Ok(Self::Integer(l.lock().unwrap().len() as isize)),
+            Self::Str(l) => Ok(Self::Integer(l.len() as isize)),
+            Self::Integer(_) => Ok(Self::Integer(std::mem::size_of::<isize>() as isize)),
+            Self::Number(_) => Ok(Self::Integer(std::mem::size_of::<f64>() as isize)),
             _ => Err(VimError::ExpectedType(VimType::Object)),
         }
     }
 
-    pub fn list_empty(&self) -> Result<Self, VimError> {
+    pub fn empty(&self) -> Result<Self, VimError> {
         match self {
-            Self::List(l) => Ok(Self::Bool(l.is_empty())),
+            Self::List(l) => Ok(Self::Bool(l.lock().unwrap().is_empty())),
+            Self::Object(l) => Ok(Self::Bool(l.lock().unwrap().is_empty())),
+            Self::Str(l) => Ok(Self::Bool(l.is_empty())),
+            Self::Integer(l) => Ok(Self::Bool(*l == 0)),
+            Self::Number(l) => Ok(Self::Bool(*l == 0.)),
+            Self::Bool(l) => Ok(Self::Bool(*l == false)),
+            Self::Nil => Ok(Self::Bool(true)),
             _ => Err(VimError::ExpectedType(VimType::Object)),
+        }
+    }
+
+    pub fn insert<S>(&self, index: Self, element: Self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        match self {
+            Self::List(l) => {
+                let index = index.to_int(ctx)?;
+                if element.contains(l) {
+                    Err(VimError::IllegalArgument("List cannot contain itself"))
+                } else {
+                    let mut l = l.lock().unwrap();
+                    if index >= 0 {
+                        l.insert(index as usize, element);
+                    } else {
+                        let max = l.len();
+                        l.insert(max + ((-index) as usize), element);
+                    }
+                    Ok(Self::Nil)
+                }
+            }
+            _ => Err(VimError::ExpectedType(VimType::Object)),
+        }
+    }
+
+    /// Checks if this Value already contains the provided Arc. This is only possible if the Arc is
+    /// a HashMap or Vec, but the inner logic doesn't actually care. Equality checking is done by
+    /// comparing the underlying Arc pointers. This is safe, since we do not derefence the
+    /// pointers, we just inspect their bits.
+    fn contains<T>(&self, list: &Arc<T>) -> bool {
+        match self {
+            Self::Object(v) => {
+                if Arc::as_ptr(v).to_bits() == Arc::as_ptr(list).to_bits() {
+                    true
+                } else {
+                    for (_, inner) in v.lock().unwrap().iter() {
+                        if inner.contains(list) {
+                            return true;
+                        }
+                    }
+                    false
+                }
+            }
+            Self::List(v) => {
+                if Arc::as_ptr(v).to_bits() == Arc::as_ptr(list).to_bits() {
+                    true
+                } else {
+                    for inner in v.lock().unwrap().iter() {
+                        if inner.contains(list) {
+                            return true;
+                        }
+                    }
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
+    pub fn extend<S>(&self, list: Self, index: Self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        match (self, list) {
+            (Self::List(l), Self::List(r)) => {
+                let index = index.nil_or(|| Self::Integer(r.lock().unwrap().len() as isize))?.to_int(ctx);
+                if self.contains(&r) {
+                    Err(VimError::IllegalArgument("List cannot contain itself"))
+                } else {
+                    todo!("Append list")
+                }
+            }
+            (Self::Object(l), Self::Object(r)) => {
+                if index.contains_str("keep") {
+                    todo!("Append objects")
+                } else if index.contains_str("force") || index.is_nil() {
+                    todo!("Append objects")
+                } else if index.contains_str("error") {
+                    todo!("Append objects")
+                } else {
+                    Err(VimError::IllegalArgument("Extend arg must be `keep`, `force`, or `error`"))
+                }
+            }
+            _ => Err(VimError::ExpectedType(VimType::List)),
+        }
+    }
+
+    pub fn remove<S>(&self, index: Self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        todo!()
+    }
+
+    pub fn deep_copy(&self) -> Self {
+        match self {
+            Self::List(l) => Self::List(Arc::new(Mutex::new(
+                l.lock().unwrap().iter().map(|v| v.deep_copy()).collect(),
+            ))),
+            Self::Object(l) => Self::Object(Arc::new(Mutex::new(
+                l.lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(n, v)| (n.clone(), v.deep_copy()))
+                    .collect(),
+            ))),
+            other => other.clone(),
         }
     }
 
@@ -472,6 +683,85 @@ impl Value {
             Self::Str(s) => s.starts_with(pat),
             _ => false,
         }
+    }
+
+    pub fn contains_str<'a, P: Pattern<'a>>(&'a self, pat: P) -> bool {
+        match self {
+            Self::Str(s) => s.strip_prefix(pat) == Some(""),
+            _ => false,
+        }
+    }
+
+    pub fn items<S>(&self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        todo!("Items")
+    }
+
+    pub fn values<S>(&self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        todo!("Values")
+    }
+
+    pub fn keys<S>(&self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        todo!("Keys")
+    }
+
+    pub fn has_key<S>(&self, key: Self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        todo!("has_key")
+    }
+
+    pub fn flatten<S>(&self, max_depth: Self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        todo!("flatten")
+    }
+
+    pub fn repeat<S>(&self, times: Self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        todo!("repeat")
+    }
+
+    pub fn count<S>(&self, val: Self, c: Self, d: Self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        todo!("count")
+    }
+
+    pub fn min<S>(&self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        todo!("min")
+    }
+
+    pub fn max<S>(&self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        todo!("max")
+    }
+
+    pub fn call<S>(&self, args: Self, dict: Self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        todo!("call")
+    }
+
+    pub fn join<S>(&self, seperator: Self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        todo!("join")
+    }
+
+    pub fn range<S>(&self, end: Self, stride: Self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        todo!("range")
+    }
+
+    pub fn split<S>(&self, pattern: Self, stride: Self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        todo!("split")
+    }
+
+    pub fn unique<S>(&self, b: Self, c: Self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        todo!("unique")
+    }
+
+    pub fn reverse<S>(&self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        todo!("reverse")
+    }
+
+    pub fn sort<S>(&self, b: Self, c: Self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        todo!("sort")
+    }
+
+    pub fn map<S>(&self, b: Self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        todo!("map")
+    }
+
+    pub fn filter<S>(&self, b: Self, ctx: &VimScriptCtx<S>) -> Result<Self, VimError> {
+        todo!("filter")
     }
 }
 
@@ -489,8 +779,8 @@ impl IntoIterator for Value {
     type IntoIter = ValueIter;
     fn into_iter(self) -> ValueIter {
         match self {
-            Self::List(l) => ValueIter::List(l.into_iter()),
-            Self::Object(m) => ValueIter::Object(m.into_iter()),
+            Self::List(l) => ValueIter::List(l.lock().unwrap().clone().into_iter()),
+            Self::Object(m) => ValueIter::Object(m.lock().unwrap().clone().into_iter()),
             Self::Str(s) => ValueIter::Str(s, 0),
             _ => ValueIter::Empty,
         }
@@ -499,7 +789,7 @@ impl IntoIterator for Value {
 
 pub enum ValueIter {
     Empty,
-    List(linked_list::IntoIter<Value>),
+    List(vec::IntoIter<Value>),
     Object(hash_map::IntoIter<String, Value>),
     Str(String, usize),
 }
@@ -531,8 +821,14 @@ impl Display for Value {
             Value::Str(s) => write!(f, "{}", s),
             Value::Bool(b) => write!(f, "{}", b),
             Value::Object(_) => write!(f, "{{ -- }}"),
-            Value::List(_) => write!(f, "[ -- ]"),
-            Value::Function(name) => write!(f, "<Function@{}>", name),
+            Value::List(l) => {
+                write!(f, "[")?;
+                for el in l.lock().unwrap().iter() {
+                    write!(f, "{el},")?;
+                }
+                write!(f, "]")
+            }
+            Value::Function(id, name) => write!(f, "<Function@{}{}>", IdDisplay(*id), name),
             Value::Nil => write!(f, "v:null"),
         }
     }
@@ -593,7 +889,8 @@ impl<'a> Names<'a> {
             Self::Single(name) => f(name, v),
             Self::List(names) => {
                 if let Value::List(vals) = v {
-                    for (name, val) in names.iter().zip(vals.into_iter()) {
+                    let mut vals = vals.lock().unwrap();
+                    for (name, val) in names.iter().zip(vals.clone().into_iter()) {
                         name.iter(val, f)?;
                     }
                     Ok(())
@@ -603,6 +900,7 @@ impl<'a> Names<'a> {
             }
             Self::Object(names) => {
                 if let Value::Object(mut vals) = v {
+                    let mut vals = vals.lock().unwrap();
                     for (idx, name) in names.iter() {
                         name.iter(vals.remove(*idx).unwrap_or(Value::Nil), f)?;
                     }

@@ -4,7 +4,7 @@
 // Distributed under terms of the MIT license.
 //
 
-use std::collections::{HashMap, LinkedList};
+use std::{collections::{HashMap, LinkedList}, sync::{Mutex, Arc}};
 
 use crate::{value::Value, State, VimError, VimScriptCtx};
 
@@ -108,7 +108,7 @@ pub fn parse<S: State + 'static>(
     }
     while parsed.len() > 1 {
         let mut changed = false;
-        changed |= function_value_call_extract(&mut parsed);
+        changed |= function_value_call_extract(&mut parsed, ctx)?;
         changed |= function_calls(&mut parsed, ctx, state)?;
         changed |= list(&mut parsed);
         changed |= list_index(&mut parsed, ctx)?;
@@ -181,7 +181,7 @@ fn object<S>(tokens: &mut Vec<ExprPeice>, ctx: &mut VimScriptCtx<S>) -> bool {
                             }
                         }
                     }
-                    tokens[i] = ExprPeice::Value(Value::Object(val));
+                    tokens[i] = ExprPeice::Value(Value::Object(Arc::new(Mutex::new(val))));
                     changed = true;
                 }
             }
@@ -202,13 +202,13 @@ fn list(tokens: &mut Vec<ExprPeice>) -> bool {
                     .split(|c| c == &ExprPeice::Op(","))
                     .all(|part| matches!(part, [ExprPeice::Value(_)] | []))
                 {
-                    let mut val = LinkedList::new();
+                    let mut val = Vec::new();
                     for _ in 1..=end {
                         if let ExprPeice::Value(v) = tokens.remove(i + 1) {
-                            val.push_back(v);
+                            val.push(v);
                         }
                     }
-                    tokens[i] = ExprPeice::Value(Value::List(val));
+                    tokens[i] = ExprPeice::Value(Value::List(Arc::new(Mutex::new(val))));
                     changed = true;
                 }
             }
@@ -259,11 +259,14 @@ fn function_call_extract(tokens: &mut Vec<ExprPeice>) -> bool {
     changed
 }
 
-fn function_value_call_extract(tokens: &mut Vec<ExprPeice>) -> bool {
+fn function_value_call_extract<S: State + 'static>(
+    tokens: &mut Vec<ExprPeice>,
+    ctx: &mut VimScriptCtx<S>,
+) -> Result<bool, VimError> {
     let mut changed = false;
     let mut i = 0;
     while i < tokens.len().saturating_sub(1) {
-        if let ExprPeice::Value(Value::Function(name)) = &tokens[i] {
+        if let ExprPeice::Value(Value::Function(None, name)) = &tokens[i] {
             if tokens[i + 1] == ExprPeice::Op("(") {
                 tokens[i] = ExprPeice::FnValueCall(name.clone());
                 tokens.remove(i + 1);
@@ -272,7 +275,7 @@ fn function_value_call_extract(tokens: &mut Vec<ExprPeice>) -> bool {
         }
         i += 1;
     }
-    changed
+    Ok(changed)
 }
 
 fn function_calls<S: State + 'static>(
@@ -338,7 +341,10 @@ fn parens(tokens: &mut Vec<ExprPeice>) -> bool {
 }
 
 type OpDef<'a> = &'a dyn Fn(Value, Value) -> Result<Value, VimError>;
-fn binary_expr(tokens: &mut Vec<ExprPeice>, ops: &[(&'static str, OpDef)]) -> Result<bool, VimError> {
+fn binary_expr(
+    tokens: &mut Vec<ExprPeice>,
+    ops: &[(&'static str, OpDef)],
+) -> Result<bool, VimError> {
     let mut changed = false;
     let mut i = 0;
     while i < tokens.len().saturating_sub(2) {
@@ -355,9 +361,7 @@ fn binary_expr(tokens: &mut Vec<ExprPeice>, ops: &[(&'static str, OpDef)]) -> Re
         }
         i += 1;
     }
-    Ok(
-        changed
-    )
+    Ok(changed)
 }
 
 fn unary_expr(
@@ -382,9 +386,7 @@ fn unary_expr(
         }
         i += 1;
     }
-    Ok(
-        changed
-    )
+    Ok(changed)
 }
 
 #[cfg(test)]

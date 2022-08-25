@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{VimScriptCtx, BuiltinFunction, value::{Value, Function}, VimError, State, Command, CmdRange};
+use crate::{VimScriptCtx, BuiltinFunction, value::{Value, Function, VimType}, VimError, State, Command, CmdRange};
 
 struct Eval;
 
@@ -35,19 +35,23 @@ impl<E> Into<Result<Value, E>> for Value {
 }
 
 macro_rules! nargs {
-    (|$ctx:ident $(,$param:ident)*| $expr:expr) => {
-        Function::Builtin(Arc::new(Builtin(|v: Vec<Value>, $ctx: &mut _| -> Result<Value, VimError> {
-            let tmp: Result<&[Value; nargs!(@COUNT $($param)*)], _> = v.as_slice().try_into();
-            if let Ok([$($param,)*]) = tmp {
-                $expr.into()
+    (|$ctx:ident $(,$param:ident $(= $default:ident)?)* $(,)?| $expr:expr) => {
+        Function::Builtin(Arc::new(Builtin(|v: Vec<Value>, $ctx: &mut VimScriptCtx<_>| -> Result<Value, VimError> {
+            const COUNT: usize = nargs!(@COUNT $(($param))*);
+            let mut iter = v.into_iter();
+            $(
+                let $param = nargs!(@EXPAND iter.next() $(; $default)?, VimError::WrongArgCount(COUNT));
+            )*
+            if iter.next().is_some() {
+                Err(VimError::WrongArgCount(COUNT))
             } else {
-                Err(VimError::WrongArgCount(nargs!(@COUNT $($param)*)))
+                $expr.into()
             }
         })))
     };
     (assert |$ctx:ident $(,$param:ident)*| $expr:expr) => {
         Function::Builtin(Arc::new(Builtin(|v: Vec<Value>, $ctx: &mut _| {
-            let tmp: Result<&[Value; nargs!(@COUNT $($param)*)], _> = v.as_slice().try_into();
+            let tmp: Result<&[Value; nargs!(@COUNT $(($param))*)], _> = v.as_slice().try_into();
             if let Ok([$($param,)*]) = tmp {
                 if $expr {
                     Ok(Value::Nil)
@@ -55,23 +59,32 @@ macro_rules! nargs {
                     Err(VimError::Exit)
                 }
             } else {
-                Err(VimError::WrongArgCount(nargs!(@COUNT $($param)*)))
+                Err(VimError::WrongArgCount(nargs!(@COUNT $(($param))*)))
             }
         })))
+    };
+    (@EXPAND $el:expr ; $default:expr, $err:expr) => {
+        $el.unwrap_or($default)
+    };
+    (@EXPAND $el:expr, $err:expr) => {
+        $el.ok_or($err)?
     };
     (@COUNT) => {
         0
     };
-    (@COUNT $($param:ident)*) => {
-        [$(nargs!(@ONE $param), )*].len()
+    (@COUNT $(($param:ident))*) => {
+        [$(nargs!(@ONE $param),)*].len()
     };
-    (@ONE $param:ident) => {
-        ()
-    };
+    (@ONE $param:ident) => { () };
+}
+
+fn fmod(a: f64, b: f64) -> f64 {
+    a - (a / b).trunc() * b
 }
 
 impl<S: State> VimScriptCtx<S> {
     pub fn builtin_functions(&mut self) {
+        use Value::Nil;
 // 	nr2char()		get a character by its number value
 // 	list2str()		get a character string from a list of numbers
         self.functions.insert_builtin("char2nr", nargs!(|ctx, a| Value::Integer(a.to_string(ctx).chars().next().map_or(0, |c| c as isize))));
@@ -101,7 +114,7 @@ impl<S: State> VimScriptCtx<S> {
         self.functions.insert_builtin("strlen", nargs!(|ctx, a| Value::Integer(a.to_string(ctx).len() as isize)));
 // 	strlen()		length of a string in bytes
         self.functions.insert_builtin("strlen", nargs!(|ctx, a| Value::Integer(a.to_string(ctx).chars().count() as isize)));
-// 	strchars()		length of a string in characters
+// 	strchars()		length of a string iProvidn characters
 // 	strwidth()		size of string when displayed
 // 	strdisplaywidth()	size of string when displayed, deals with tabs
 // 	substitute()		substitute a pattern match with a string
@@ -122,54 +135,66 @@ impl<S: State> VimScriptCtx<S> {
 // 	trim()			trim characters from a string
 //
 // List manipulation:					*list-functions*
-        self.functions.insert_builtin("get", nargs!(|ctx, a, b| a.index(b, ctx)));
+        self.functions.insert_builtin("get", nargs!(|ctx, a, b| a.index(&b, ctx)));
 // 	get()			get an item without error for wrong index
-        self.functions.insert_builtin("len", nargs!(|ctx, a| a.list_len()));
+        self.functions.insert_builtin("len", nargs!(|_ctx, a| a.len()));
 // 	len()			number of items in a List
-        self.functions.insert_builtin("empty", nargs!(|ctx, a| a.list_empty()));
+        self.functions.insert_builtin("empty", nargs!(|_ctx, a| a.empty()));
 // 	empty()			check if List is empty
+        self.functions.insert_builtin("insert", nargs!(|ctx, a, b, c = Nil| a.insert(c.nil_or(|| Value::Integer(0))?, b, ctx)));
 // 	insert()		insert an item somewhere in a List
+        self.functions.insert_builtin("add", nargs!(|ctx, a, b| a.insert(a.len()?, b, ctx)));
 // 	add()			append an item to a List
+        self.functions.insert_builtin("extend", nargs!(|ctx, a, b, c = Nil| a.extend(b, c.nil_or(|| a.len())?, ctx)));
 // 	extend()		append a List to a List
+        self.functions.insert_builtin("remove", nargs!(|ctx, a, b| a.remove(b, ctx)));
 // 	remove()		remove one or more items from a List
+        self.functions.insert_builtin("copy", nargs!(|ctx, a| a));
 // 	copy()			make a shallow copy of a List
+        self.functions.insert_builtin("deepcopy", nargs!(|ctx, a| a.deep_copy()));
 // 	deepcopy()		make a full copy of a List
+        self.functions.insert_builtin("filter", nargs!(|ctx, a, b| a.filter(b, ctx)));
 // 	filter()		remove selected items from a List
+        self.functions.insert_builtin("map", nargs!(|ctx, a, b| a.map(b, ctx)));
 // 	map()			change each List item
+        self.functions.insert_builtin("sort", nargs!(|ctx, a, b = Nil, c = Nil| a.sort(b, c, ctx)));
 // 	sort()			sort a List
+        self.functions.insert_builtin("reverse", nargs!(|ctx, a| a.reverse(ctx)));
 // 	reverse()		reverse the order of a List
+        self.functions.insert_builtin("uniq", nargs!(|ctx, a, b = Nil, c = Nil| a.unique(b, c, ctx)));
 // 	uniq()			remove copies of repeated adjacent items
+        self.functions.insert_builtin("split", nargs!(|ctx, a, b = Nil, c = Nil| a.split(b, c, ctx)));
 // 	split()			split a String into a List
+        self.functions.insert_builtin("join", nargs!(|ctx, a, b = Nil| a.join(b, ctx)));
 // 	join()			join List items into a String
+        self.functions.insert_builtin("range", nargs!(|ctx, a, b = Nil, c = Nil| a.range(b, c, ctx)));
 // 	range()			return a List with a sequence of numbers
+        self.functions.insert_builtin("string", nargs!(|ctx, a| Value::Str(a.to_string(ctx))));
 // 	string()		String representation of a List
+        self.functions.insert_builtin("call", nargs!(|ctx, a, b, c = Nil| a.call(b, c, ctx)));
 // 	call()			call a function with List as arguments
+        // self.functions.insert_builtin("index", nargs!(|ctx, a, b, c = Nil| a.call(b, c, ctx)));
 // 	index()			index of a value in a List
+        self.functions.insert_builtin("max", nargs!(|ctx, a| a.max(ctx)));
 // 	max()			maximum value in a List
+        self.functions.insert_builtin("min", nargs!(|ctx, a| a.min(ctx)));
 // 	min()			minimum value in a List
+        self.functions.insert_builtin("count", nargs!(|ctx, a, b, c = Nil, d = Nil| a.count(b, c, d, ctx)));
 // 	count()			count number of times a value appears in a List
+        self.functions.insert_builtin("repeat", nargs!(|ctx, a, b| a.repeat(b, ctx)));
 // 	repeat()		repeat a List multiple times
+        self.functions.insert_builtin("flatten", nargs!(|ctx, a, b = Nil| a.flatten(b, ctx)));
 // 	flatten()		flatten a List
 //
 // Dictionary manipulation:				*dict-functions*
-// 	get()			get an entry without an error for a wrong key
-// 	len()			number of entries in a Dictionary
+        self.functions.insert_builtin("has_key", nargs!(|ctx, a, b| a.has_key(b, ctx)));
 // 	has_key()		check whether a key appears in a Dictionary
-// 	empty()			check if Dictionary is empty
-// 	remove()		remove an entry from a Dictionary
-// 	extend()		add entries from one Dictionary to another
-// 	filter()		remove selected entries from a Dictionary
-// 	map()			change each Dictionary entry
+        self.functions.insert_builtin("keys", nargs!(|ctx, a| a.keys(ctx)));
 // 	keys()			get List of Dictionary keys
+        self.functions.insert_builtin("values", nargs!(|ctx, a| a.values(ctx)));
 // 	values()		get List of Dictionary values
+        self.functions.insert_builtin("items", nargs!(|ctx, a| a.items(ctx)));
 // 	items()			get List of Dictionary key-value pairs
-// 	copy()			make a shallow copy of a Dictionary
-// 	deepcopy()		make a full copy of a Dictionary
-// 	string()		String representation of a Dictionary
-// 	max()			maximum value in a Dictionary
-// 	min()			minimum value in a Dictionary
-        // self.functions.insert_builtin("count", nargs!(|ctx, a| Value::Integer(a.to_int(ctx))));
-// 	count()			count number of times a value appears
 //
 // Floating point computation:				*float-functions*
         self.functions.insert_builtin("float2nr", nargs!(|ctx, a| Value::Integer(a.to_int(ctx)?)));
@@ -184,6 +209,7 @@ impl<S: State> VimScriptCtx<S> {
 // 	floor()			round down
         self.functions.insert_builtin("trunc", nargs!(|ctx, a| Value::Number(a.to_num(ctx)?.trunc())));
 // 	trunc()			remove value after decimal point
+        self.functions.insert_builtin("fmod", nargs!(|ctx, a, b| Value::Number(fmod(a.to_num(ctx)?, b.to_num(ctx)?))));
 // 	fmod()			remainder of division
         self.functions.insert_builtin("exp", nargs!(|ctx, a| Value::Number(a.to_num(ctx)?.exp())));
 // 	exp()			exponential
@@ -225,10 +251,12 @@ impl<S: State> VimScriptCtx<S> {
 // 	or()			bitwise OR
         self.functions.insert_builtin("xor", nargs!(|ctx, a, b| Value::Integer(a.to_int(ctx)? ^ b.to_int(ctx)?)));
 // 	xor()			bitwise XOR
+        // self.functions.insert_builtin("sha256", nargs!(|ctx, a| todo!("sha256")));
 // 	sha256()		SHA-256 hash
 //
 // Variables:						*var-functions*
 // 	type()			type of a variable
+        self.functions.insert_builtin("type", nargs!(|ctx, a| Value::Integer(a.ty().as_int())));
 // 	islocked()		check if a variable is locked
 // 	funcref()		get a Funcref for a function reference
 // 	function()		get a Funcref for a function name
@@ -269,6 +297,7 @@ impl<S: State> VimScriptCtx<S> {
 // 	ctxsize()		return context stack size
 //
 // Various:					*various-functions*
+        self.functions.insert_builtin("exists", nargs!(|ctx, a| Value::Bool(ctx.lookup(a.to_string(ctx)).is_ok())));
 // 	exists()		check if a variable, function, etc. exists
 //
 // 	libcall()		call a function in an external library

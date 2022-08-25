@@ -4,7 +4,7 @@
 // Distributed under terms of the MIT license.
 //
 
-use std::collections::HashMap;
+use std::{collections::HashMap, fmt::Display};
 
 type Result<T> = std::result::Result<T, NamespaceError>;
 #[derive(Debug, thiserror::Error)]
@@ -28,6 +28,24 @@ impl IdProcuder {
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub struct Id(usize);
+
+impl Display for Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+pub struct IdDisplay(pub Option<Id>);
+
+impl Display for IdDisplay {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(i) = self.0 {
+            write!(f, "{}:", i)
+        } else {
+            Ok(())
+        }
+    }
+}
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
 pub enum Namespace {

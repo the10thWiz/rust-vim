@@ -491,7 +491,7 @@ impl VimInner {
     pub fn new() -> Self {
         let mut buffer_id = IdProcuder::default();
         let mut window_id = IdProcuder::default();
-        let mut script_id = IdProcuder::default();
+        let script_id = IdProcuder::default();
         let args = Args::parse();
         let mut buffers: Vec<_> = args
             .files
@@ -848,8 +848,9 @@ fn symbol_starts_with(frame: &BacktraceFrame, pat: &str) -> bool {
     })
 }
 
+
 fn is(location: &Location, symbol: &BacktraceSymbol) -> bool {
-    location.file() == format!("{}", symbol.filename().unwrap().display())
+    location.file() == format!("{}", symbol.filename().unwrap_or(&Path::new("/")).display())
         && location.line() == symbol.lineno().unwrap_or(0)
         && location.column() == symbol.colno().unwrap_or(0)
 }
@@ -859,7 +860,7 @@ impl Display for Trimmed<'_> {
         let mut path_formatter =
             |f: &mut std::fmt::Formatter<'_>, s: BytesOrWideString<'_>| s.fmt(f);
         let mut f = BacktraceFmt::new(fmt, backtrace::PrintFmt::Short, &mut path_formatter);
-        f.add_context();
+        f.add_context()?;
         self.1
             .frames()
             .iter()

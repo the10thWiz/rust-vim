@@ -46,6 +46,6 @@ pub fn default(reg: &mut VimScriptCtx<VimInner>) {
     multi(reg, ["setl", "setlocal"], crate::options::set_local);
     multi(reg, ["setg", "setglobal"], crate::options::set_global);
     multi(reg, ["wq"], |_range, _bang, _args, ctx, v| {
-        ctx.run("write | quit", v);
+        ctx.run("write | quit", v).unwrap();
     })
 }
